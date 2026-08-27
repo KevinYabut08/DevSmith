@@ -7,8 +7,8 @@ import {
   ArrowUpRight,
   Search,
 } from "lucide-react";
-import { useState } from "react";
-
+import { useEffect, useState } from "react";
+import axios from "axios";
 import CreateProjectModal from "./components/CreateProjectModal";
 import ProjectCard from "./components/ProjectCard";
 import { TerminalDots, Eyebrow } from "./components/ui";
@@ -18,22 +18,48 @@ function App() {
   const [showModal, setShowModal] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
 
-  const createProject = (title: string, description: string) => {
-    const newProject: Project = {
-      id: crypto.randomUUID(),
-      title,
-      description,
-      status: "Planning",
-      createdAt: new Date().toISOString(),
-    };
+  const createProject = async (
+    title: string,
+    description: string
+  ) => {
+    try {
+      const response = await axios.post<Project>(
+        "http://localhost:3001/api/projects",
+        {
+          title,
+          description,
+        }
+      );
 
-    setProjects((prev) => [newProject, ...prev]);
+      setProjects((prev) => [
+        response.data,
+        ...prev,
+      ]);
+    } catch (error) {
+      console.error("Failed to create project:", error);
+    }
   };
 
   const activeCount = projects.filter(
     (p) => p.status === "Planning" || p.status === "In Progress"
   ).length;
   const completedCount = projects.filter((p) => p.status === "Completed").length;
+
+  useEffect(() => {
+  const loadProjects = async () => {
+    try {
+      const response = await axios.get<Project[]>(
+        "http://localhost:3001/api/projects"
+      );
+
+      setProjects(response.data);
+    } catch (error) {
+      console.error("Failed to load projects:", error);
+    }
+  };
+
+  loadProjects();
+}, []);
 
   return (
     <>
