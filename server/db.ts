@@ -41,4 +41,21 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS assistant_messages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    content TEXT NOT NULL,
+    code TEXT DEFAULT '',
+    task_id TEXT,
+    created_at TEXT NOT NULL,
+
+    FOREIGN KEY (project_id)
+      REFERENCES projects(id)
+      ON DELETE CASCADE
+  );
+`);
+
 export default db;

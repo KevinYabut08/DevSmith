@@ -1,10 +1,9 @@
 import {
   FolderKanban,
   LayoutDashboard,
-  Settings,
+  Settings as SettingsIcon,
   Plus,
   Sparkles,
-  ArrowUpRight,
   Search,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -13,29 +12,68 @@ import axios from "axios";
 import CreateProjectModal from "./components/CreateProjectModal";
 import ProjectCard from "./components/ProjectCard";
 import ProjectWorkspace from "./components/ProjectWorkspace";
+import SettingsPanel from "./components/Settings";
 import { TerminalDots, Eyebrow } from "./components/ui";
+
 import type { Project } from "./types/project";
 
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || "http://localhost:3001";
+
 function App() {
+  /*
+   * ================================
+   * STATE
+   * ================================
+   */
+
   const [showModal, setShowModal] = useState(false);
-  const [projects, setProjects] = useState<Project[]>([]);
+
+  const [showSettings, setShowSettings] =
+    useState(false);
+
+  const [projects, setProjects] =
+    useState<Project[]>([]);
+
   const [selectedProject, setSelectedProject] =
     useState<Project | null>(null);
+
   const [search, setSearch] = useState("");
 
   /*
-   * Load projects from the backend
+   * Selected Ollama model
+   *
+   * Example:
+   * llama3.2
+   * qwen2.5-coder
+   * deepseek-coder
    */
+  const [selectedModel, setSelectedModel] =
+    useState<string | null>(() => {
+      return localStorage.getItem(
+        "devsmith-selected-model"
+      );
+    });
+
+  /*
+   * ================================
+   * LOAD PROJECTS
+   * ================================
+   */
+
   useEffect(() => {
     const loadProjects = async () => {
       try {
         const response = await axios.get<Project[]>(
-          "http://localhost:3001/api/projects"
+          `${API_BASE_URL}/api/projects`
         );
 
         setProjects(response.data);
       } catch (error) {
-        console.error("Failed to load projects:", error);
+        console.error(
+          "Failed to load projects:",
+          error
+        );
       }
     };
 
@@ -43,20 +81,24 @@ function App() {
   }, []);
 
   /*
-   * Create a new project
+   * ================================
+   * CREATE PROJECT
+   * ================================
    */
+
   const createProject = async (
     title: string,
     description: string
   ) => {
     try {
-      const response = await axios.post<Project>(
-        "http://localhost:3001/api/projects",
-        {
-          title,
-          description,
-        }
-      );
+      const response =
+        await axios.post<Project>(
+          `${API_BASE_URL}/api/projects`,
+          {
+            title,
+            description,
+          }
+        );
 
       setProjects((prev) => [
         response.data,
@@ -65,13 +107,36 @@ function App() {
 
       setShowModal(false);
     } catch (error) {
-      console.error("Failed to create project:", error);
+      console.error(
+        "Failed to create project:",
+        error
+      );
     }
   };
 
   /*
-   * Project statistics
+   * ================================
+   * SELECT OLLAMA MODEL
+   * ================================
    */
+
+  const handleSelectModel = (
+    model: string
+  ) => {
+    setSelectedModel(model);
+
+    localStorage.setItem(
+      "devsmith-selected-model",
+      model
+    );
+  };
+
+  /*
+   * ================================
+   * PROJECT STATISTICS
+   * ================================
+   */
+
   const activeCount = projects.filter(
     (project) =>
       project.status === "Planning" ||
@@ -84,11 +149,16 @@ function App() {
   ).length;
 
   /*
-   * Search projects
+   * ================================
+   * SEARCH
+   * ================================
    */
-  const filteredProjects = projects.filter(
-    (project) => {
-      const query = search.toLowerCase().trim();
+
+  const filteredProjects =
+    projects.filter((project) => {
+      const query = search
+        .toLowerCase()
+        .trim();
 
       if (!query) {
         return true;
@@ -102,29 +172,65 @@ function App() {
           .toLowerCase()
           .includes(query)
       );
-    }
-  );
+    });
 
   /*
-   * Open project workspace
+   * ================================
+   * PROJECT WORKSPACE
+   * ================================
+   *
+   * IMPORTANT:
+   * This happens AFTER all hooks.
    */
+
   if (selectedProject) {
     return (
       <ProjectWorkspace
         project={selectedProject}
-        onBack={() => setSelectedProject(null)}
+        model={selectedModel}
+        onBack={() =>
+          setSelectedProject(null)
+        }
       />
     );
   }
+
+  /*
+   * ================================
+   * SETTINGS SCREEN
+   * ================================
+   */
+
+  if (showSettings) {
+    return (
+      <SettingsPanel
+        selectedModel={selectedModel}
+        onSelectModel={handleSelectModel}
+        onBack={() =>
+          setShowSettings(false)
+        }
+      />
+    );
+  }
+
+  /*
+   * ================================
+   * MAIN DASHBOARD
+   * ================================
+   */
 
   return (
     <>
       <div className="min-h-screen bg-[#071A1F] font-sans text-[#F4FFFC] antialiased">
 
-        {/* Sidebar */}
+        {/* =====================================
+            SIDEBAR
+        ====================================== */}
+
         <aside className="fixed left-0 top-0 flex h-screen w-64 flex-col border-r border-white/[0.06] bg-[#08191F]">
 
           {/* Logo */}
+
           <div className="flex h-20 items-center border-b border-white/[0.06] px-6">
             <img
               src="/devsmith-logo.png"
@@ -134,6 +240,7 @@ function App() {
           </div>
 
           {/* Navigation */}
+
           <nav className="flex-1 px-4 py-6">
 
             <Eyebrow>
@@ -143,10 +250,21 @@ function App() {
             <div className="mt-3 space-y-1">
 
               {/* Dashboard */}
+
               <button
                 type="button"
-                className="group relative flex w-full items-center gap-3 rounded-lg bg-[#0E5666]/30 px-3 py-2.5 text-sm font-medium text-[#B8F2E6] outline-none transition focus-visible:ring-2 focus-visible:ring-[#7FD8AE]/50"
+                onClick={() => {
+                  setShowSettings(false);
+                  setSelectedProject(null);
+
+                  window.scrollTo({
+                    top: 0,
+                    behavior: "smooth",
+                  });
+                }}
+                className="group relative flex w-full items-center gap-3 rounded-lg bg-[#0E5666]/30 px-3 py-2.5 text-sm font-medium text-[#B8F2E6] outline-none transition hover:bg-[#0E5666]/40 focus-visible:ring-2 focus-visible:ring-[#7FD8AE]/50"
               >
+
                 <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-[#7FD8AE]" />
 
                 <LayoutDashboard
@@ -158,20 +276,26 @@ function App() {
               </button>
 
               {/* Projects */}
+
               <button
                 type="button"
                 onClick={() => {
-                  const element =
-                    document.getElementById(
-                      "projects"
-                    );
+                  setShowSettings(false);
 
-                  element?.scrollIntoView({
-                    behavior: "smooth",
-                  });
+                  setTimeout(() => {
+                    document
+                      .getElementById(
+                        "projects"
+                      )
+                      ?.scrollIntoView({
+                        behavior:
+                          "smooth",
+                      });
+                  }, 0);
                 }}
                 className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-[#7B9998] outline-none transition hover:bg-white/[0.04] hover:text-[#F4FFFC] focus-visible:ring-2 focus-visible:ring-[#7FD8AE]/50"
               >
+
                 <FolderKanban
                   size={17}
                   strokeWidth={2}
@@ -182,6 +306,7 @@ function App() {
             </div>
 
             {/* System */}
+
             <div className="mt-8">
 
               <Eyebrow>
@@ -192,9 +317,13 @@ function App() {
 
                 <button
                   type="button"
+                  onClick={() =>
+                    setShowSettings(true)
+                  }
                   className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-[#7B9998] outline-none transition hover:bg-white/[0.04] hover:text-[#F4FFFC] focus-visible:ring-2 focus-visible:ring-[#7FD8AE]/50"
                 >
-                  <Settings
+
+                  <SettingsIcon
                     size={17}
                     strokeWidth={2}
                   />
@@ -206,7 +335,10 @@ function App() {
             </div>
           </nav>
 
-          {/* AI Workspace */}
+          {/* =====================================
+              AI WORKSPACE
+          ====================================== */}
+
           <div className="border-t border-white/[0.06] p-4">
 
             <div className="rounded-lg border border-white/[0.06] bg-white/[0.03] p-4">
@@ -231,18 +363,38 @@ function App() {
               </div>
 
               <p className="text-xs leading-relaxed text-[#7B9998]">
-                Turn your next idea into an actionable development plan.
+                Turn your next idea into an
+                actionable development plan.
               </p>
+
+              {/* Selected model */}
+
+              <div className="mt-3 rounded-md border border-white/[0.06] bg-black/10 px-3 py-2">
+
+                <p className="font-mono text-[10px] uppercase tracking-wider text-[#5C8A85]">
+                  Active Model
+                </p>
+
+                <p className="mt-1 truncate text-xs text-[#B8F2E6]">
+                  {selectedModel ||
+                    "No model selected"}
+                </p>
+
+              </div>
 
             </div>
 
           </div>
         </aside>
 
-        {/* Main */}
+        {/* =====================================
+            MAIN
+        ====================================== */}
+
         <main className="relative ml-64 min-h-screen overflow-hidden">
 
           {/* Ambient glow */}
+
           <div
             className="pointer-events-none absolute -top-40 right-0 h-[420px] w-[420px] rounded-full opacity-[0.10] blur-[110px]"
             style={{
@@ -251,7 +403,10 @@ function App() {
             }}
           />
 
-          {/* Header */}
+          {/* =====================================
+              HEADER
+          ====================================== */}
+
           <header className="relative flex h-20 items-center justify-between border-b border-white/[0.06] px-10">
 
             <div>
@@ -269,6 +424,7 @@ function App() {
             <div className="flex items-center gap-3">
 
               {/* Search */}
+
               <div className="relative hidden md:block">
 
                 <Search
@@ -280,7 +436,9 @@ function App() {
                   type="text"
                   value={search}
                   onChange={(event) =>
-                    setSearch(event.target.value)
+                    setSearch(
+                      event.target.value
+                    )
                   }
                   placeholder="Search projects..."
                   className="w-56 rounded-lg border border-white/[0.08] bg-white/[0.03] py-2 pl-9 pr-3 text-sm text-[#F4FFFC] outline-none placeholder:text-[#5C8A85] transition focus:border-[#7FD8AE]/40 focus:ring-2 focus:ring-[#7FD8AE]/20"
@@ -289,6 +447,7 @@ function App() {
               </div>
 
               {/* New Project */}
+
               <button
                 type="button"
                 onClick={() =>
@@ -303,16 +462,19 @@ function App() {
                 />
 
                 New Project
-
               </button>
 
             </div>
           </header>
 
-          {/* Content */}
+          {/* =====================================
+              CONTENT
+          ====================================== */}
+
           <div className="relative mx-auto max-w-7xl px-10 py-10">
 
             {/* Welcome */}
+
             <section className="mb-10">
 
               <Eyebrow>
@@ -324,13 +486,17 @@ function App() {
               </h2>
 
               <p className="mt-3 max-w-xl leading-relaxed text-[#8FA9A8]">
-                Turn your software ideas into structured roadmaps,
-                milestones, and actionable development tasks.
+                Turn your software ideas into
+                structured roadmaps, milestones,
+                and actionable development tasks.
               </p>
 
             </section>
 
-            {/* Stats */}
+            {/* =====================================
+                STATS
+            ====================================== */}
+
             <section className="grid gap-5 md:grid-cols-3">
 
               <StatCard
@@ -353,7 +519,10 @@ function App() {
 
             </section>
 
-            {/* Projects */}
+            {/* =====================================
+                PROJECTS
+            ====================================== */}
+
             <section
               id="projects"
               className="mt-12"
@@ -368,7 +537,8 @@ function App() {
                   </h3>
 
                   <p className="mt-1 text-sm text-[#8FA9A8]">
-                    Projects you're currently working on.
+                    Projects you're currently
+                    working on.
                   </p>
 
                 </div>
@@ -377,7 +547,8 @@ function App() {
                   <span className="font-mono text-xs text-[#5C8A85]">
                     {filteredProjects.length}{" "}
                     project
-                    {filteredProjects.length !== 1
+                    {filteredProjects.length !==
+                    1
                       ? "s"
                       : ""}
                   </span>
@@ -385,7 +556,8 @@ function App() {
 
               </div>
 
-              {/* Empty state */}
+              {/* Empty */}
+
               {projects.length === 0 ? (
 
                 <div className="relative flex min-h-[300px] flex-col items-center justify-center overflow-hidden rounded-xl border border-dashed border-white/[0.10] bg-white/[0.015] px-6 text-center">
@@ -409,7 +581,9 @@ function App() {
                   </h4>
 
                   <p className="mt-2 max-w-md text-sm leading-relaxed text-[#8FA9A8]">
-                    Start with an idea. DevSmith will help you turn it into a structured development plan.
+                    Start with an idea. DevSmith
+                    will help you turn it into a
+                    structured development plan.
                   </p>
 
                   <button
@@ -431,9 +605,11 @@ function App() {
 
                 </div>
 
-              ) : filteredProjects.length === 0 ? (
+              ) : filteredProjects.length ===
+                0 ? (
 
                 /* No search results */
+
                 <div className="flex min-h-[220px] flex-col items-center justify-center rounded-xl border border-dashed border-white/[0.10] bg-white/[0.015] text-center">
 
                   <Search
@@ -446,7 +622,8 @@ function App() {
                   </h4>
 
                   <p className="mt-2 text-sm text-[#7B9998]">
-                    Try a different project name or description.
+                    Try a different project name
+                    or description.
                   </p>
 
                 </div>
@@ -454,6 +631,7 @@ function App() {
               ) : (
 
                 /* Project cards */
+
                 <div className="grid gap-5 md:grid-cols-2">
 
                   {filteredProjects.map(
@@ -475,12 +653,14 @@ function App() {
               )}
 
             </section>
-
           </div>
         </main>
       </div>
 
-      {/* Create Project Modal */}
+      {/* =====================================
+          CREATE PROJECT MODAL
+      ====================================== */}
+
       <CreateProjectModal
         open={showModal}
         onClose={() =>
@@ -491,6 +671,12 @@ function App() {
     </>
   );
 }
+
+/*
+ * ==========================================
+ * STAT CARD
+ * ==========================================
+ */
 
 function StatCard({
   label,
@@ -525,7 +711,6 @@ function StatCard({
         </span>
 
       </div>
-
     </div>
   );
 }
