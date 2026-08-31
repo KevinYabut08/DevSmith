@@ -1,4 +1,7 @@
-import { generateWithOllama } from "./ollama";
+// import { generateWithOllama } from "./ollama";
+import { generateWithOllama } from "./llmProvider";
+
+import { ROADMAP_PROMPT } from "./prompts";
 
 interface RoadmapMilestone {
   title: string;
@@ -7,13 +10,17 @@ interface RoadmapMilestone {
 }
 
 export interface GeneratedRoadmap {
+  techStack: string[];
   milestones: RoadmapMilestone[];
 }
 
 function extractJson(raw: string): string {
   const text = raw.trim();
 
-  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const fencedMatch = text.match(
+    /```(?:json)?\s*([\s\S]*?)\s*```/i
+  );
+
   if (fencedMatch?.[1]) {
     return fencedMatch[1].trim();
   }
@@ -21,47 +28,78 @@ function extractJson(raw: string): string {
   const firstBrace = text.indexOf("{");
   const lastBrace = text.lastIndexOf("}");
 
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return text.slice(firstBrace, lastBrace + 1);
+  if (
+    firstBrace >= 0 &&
+    lastBrace > firstBrace
+  ) {
+    return text.slice(
+      firstBrace,
+      lastBrace + 1
+    );
   }
 
   return text;
 }
 
-function isValidRoadmap(value: unknown): value is GeneratedRoadmap {
+function isValidRoadmap(
+  value: unknown
+): value is GeneratedRoadmap {
   if (!value || typeof value !== "object") {
     return false;
   }
 
-  const roadmap = value as { milestones?: unknown };
+  const roadmap = value as {
+    techStack?: unknown;
+    milestones?: unknown;
+  };
 
-  if (!Array.isArray(roadmap.milestones) || roadmap.milestones.length === 0) {
+  if (
+    !Array.isArray(roadmap.techStack) ||
+    !roadmap.techStack.every(
+      (item) =>
+        typeof item === "string" &&
+        item.trim().length > 0
+    )
+  ) {
     return false;
   }
 
-  return roadmap.milestones.every((milestone) => {
-    if (!milestone || typeof milestone !== "object") {
-      return false;
+  if (
+    !Array.isArray(roadmap.milestones) ||
+    roadmap.milestones.length === 0
+  ) {
+    return false;
+  }
+
+  return roadmap.milestones.every(
+    (milestone) => {
+      if (
+        !milestone ||
+        typeof milestone !== "object"
+      ) {
+        return false;
+      }
+
+      const item = milestone as {
+        title?: unknown;
+        description?: unknown;
+        tasks?: unknown;
+      };
+
+      return (
+        typeof item.title === "string" &&
+        item.title.trim().length > 0 &&
+        typeof item.description === "string" &&
+        Array.isArray(item.tasks) &&
+        item.tasks.length > 0 &&
+        item.tasks.every(
+          (task) =>
+            typeof task === "string" &&
+            task.trim().length > 0
+        )
+      );
     }
-
-    const item = milestone as {
-      title?: unknown;
-      description?: unknown;
-      tasks?: unknown;
-    };
-
-    return (
-      typeof item.title === "string" &&
-      item.title.trim().length > 0 &&
-      typeof item.description === "string" &&
-      Array.isArray(item.tasks) &&
-      item.tasks.length > 0 &&
-      item.tasks.every(
-        (task) =>
-          typeof task === "string" && task.trim().length > 0
-      )
-    );
-  });
+  );
 }
 
 export async function generateRoadmap(
@@ -69,76 +107,84 @@ export async function generateRoadmap(
   description: string,
   model: string
 ): Promise<GeneratedRoadmap> {
-  const selectedModel = model?.trim();
-
-  if (!selectedModel) {
-    throw new Error("Ollama model is required.");
+  if (!title?.trim()) {
+    throw new Error(
+      "Project title is required."
+    );
   }
 
-  if (!title?.trim()) {
-    throw new Error("Project title is required.");
+  if (!model?.trim()) {
+    throw new Error(
+      "Ollama model is required."
+    );
   }
 
   const prompt = `
-You are a senior software architect.
+${ROADMAP_PROMPT}
 
-Create a practical development roadmap for this project.
-
-Project title:
+PROJECT TITLE:
 ${title.trim()}
 
-Project description:
+PROJECT DESCRIPTION:
 ${description?.trim() || "No description provided."}
-
-Return ONLY valid JSON. Do not use Markdown, code fences, or explanations.
-
-Use exactly this structure:
-{
-  "milestones": [
-    {
-      "title": "string",
-      "description": "string",
-      "tasks": ["string", "string", "string"]
-    }
-  ]
-}
-
-Requirements:
-- Create 4 to 6 milestones.
-- Each milestone must contain 3 to 6 actionable tasks.
-- Order milestones logically.
-- Include setup, architecture, core features, testing, and deployment where appropriate.
 `;
 
-  console.log(`Generating roadmap with Ollama model: ${selectedModel}`);
+  console.log(
+    `🗺️ Generating roadmap with Ollama model: ${model}`
+  );
 
-  const raw = await generateWithOllama(selectedModel, prompt, {
-    format: "json",
-  });
-
-  if (typeof raw !== "string" || !raw.trim()) {
-    throw new Error("Ollama returned an empty response.");
-  }
+  const raw = await generateWithOllama(
+    model.trim(),
+    prompt,
+    {
+      format: "json",
+      timeout: 180000,
+    }
+  );
 
   let parsed: unknown;
 
   try {
-    parsed = JSON.parse(extractJson(raw));
+    parsed = JSON.parse(
+      extractJson(raw)
+    );
   } catch (error) {
-    console.error("Failed to parse Ollama JSON:", raw, error);
-    throw new Error("Ollama returned invalid JSON.");
+    console.error(
+      "❌ Invalid roadmap JSON:",
+      raw
+    );
+
+    throw new Error(
+      "Ollama returned invalid roadmap JSON."
+    );
   }
 
   if (!isValidRoadmap(parsed)) {
-    console.error("Invalid roadmap structure from Ollama:", parsed);
-    throw new Error("Ollama returned an invalid roadmap structure.");
+    console.error(
+      "❌ Invalid roadmap structure:",
+      parsed
+    );
+
+    throw new Error(
+      "Ollama returned an invalid roadmap structure."
+    );
   }
 
   return {
-    milestones: parsed.milestones.map((milestone) => ({
-      title: milestone.title.trim(),
-      description: milestone.description.trim(),
-      tasks: milestone.tasks.map((task) => task.trim()),
-    })),
+    techStack: parsed.techStack.map(
+      (item) => item.trim()
+    ),
+
+    milestones:
+      parsed.milestones.map(
+        (milestone) => ({
+          title: milestone.title.trim(),
+          description:
+            milestone.description.trim(),
+          tasks: milestone.tasks.map(
+            (task) => task.trim()
+          ),
+        })
+      ),
   };
 }

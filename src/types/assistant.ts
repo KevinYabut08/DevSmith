@@ -20,3 +20,22 @@ export interface TaskHandoffContext {
   taskDescription: string;
   milestoneTitle: string;
 }
+
+export type IndexedFileStatus =
+  | "indexing"
+  | "indexed"
+  | "error";
+
+export interface IndexedFile {
+  id: string;
+  projectId: string;
+  name: string;
+  path?: string;
+  extension?: string;
+  size: number;
+  status: IndexedFileStatus;
+  chunks?: number;
+  createdAt: string;
+  updatedAt?: string;
+  error?: string;
+}

@@ -14,6 +14,7 @@ import ProjectCard from "./components/ProjectCard";
 import ProjectWorkspace from "./components/ProjectWorkspace";
 import SettingsPanel from "./components/Settings";
 import { TerminalDots, Eyebrow } from "./components/ui";
+import { useDevSmithWebMCPTools } from "./webmcpTools";
 
 import type { Project } from "./types/project";
 
@@ -54,6 +55,18 @@ function App() {
         "devsmith-selected-model"
       );
     });
+
+  /*
+   * ================================
+   * WEBMCP TOOLS
+   * ================================
+   *
+   * Registers DevSmith's core actions (create project,
+   * generate roadmap, ask the assistant, etc.) as tools
+   * an agent can call directly, using whatever model is
+   * currently selected as the default.
+   */
+  useDevSmithWebMCPTools(selectedModel);
 
   /*
    * ================================

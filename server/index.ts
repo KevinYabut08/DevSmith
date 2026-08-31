@@ -1,31 +1,48 @@
 import "dotenv/config";
-import express, { Request, Response } from "express";
+
+import express, {
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
+
 import cors from "cors";
+import multer from "multer";
+import path from "path";
+import fs from "fs/promises";
 import { randomUUID } from "crypto";
+
 import db from "./db";
-import {
-  generateRoadmap,
-} from "./ai/roadmapGenerator";
-import {
-  askTaskAssistant,
-} from "./ai/taskAssistant";
+
+import { generateRoadmap } from "./ai/roadmapGenerator";
+import { askTaskAssistant } from "./ai/taskAssistant";
+
 import {
   runProjectAssistant,
   type AssistantMode,
+  type ChatTurn,
+  type TaskContext,
 } from "./ai/projectAssistant";
+
 import {
   getOllamaModels,
   isOllamaRunning,
 } from "./ai/ollama";
 
+import { generateCode } from "./ai/codingAgent";
+
+import {
+  indexProjectFiles,
+  type IndexedFile,
+} from "./ai/fileIndexer";
+
 const app = express();
 
-// Reads from env so you can override without touching code, same as the
-// frontend's VITE_API_URL.
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
+const PORT = Number(process.env.PORT) || 3001;
 
-app.use(cors());
-app.use(express.json());
+const OLLAMA_URL =
+  process.env.OLLAMA_URL ||
+  "http://127.0.0.1:11434";
 
 const ASSISTANT_MODES: AssistantMode[] = [
   "ask",
@@ -34,524 +51,1315 @@ const ASSISTANT_MODES: AssistantMode[] = [
   "fix",
 ];
 
-interface AssistantChatTurn {
-  role: "user" | "assistant";
-  content: string;
+/*
+|--------------------------------------------------------------------------
+| Upload Configuration
+|--------------------------------------------------------------------------
+*/
+
+const UPLOAD_ROOT = path.resolve(
+  process.env.UPLOAD_DIR || "./uploads"
+);
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+const ALLOWED_EXTENSIONS = new Set([
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".py",
+  ".java",
+  ".c",
+  ".cpp",
+  ".cs",
+  ".go",
+  ".rs",
+  ".php",
+  ".rb",
+  ".swift",
+  ".kt",
+  ".kts",
+  ".html",
+  ".css",
+  ".scss",
+  ".sass",
+  ".less",
+  ".json",
+  ".xml",
+  ".yaml",
+  ".yml",
+  ".md",
+  ".txt",
+  ".sql",
+  ".sh",
+  ".bash",
+  ".env",
+  ".gitignore",
+  ".dockerfile",
+]);
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: async (
+      req,
+      _file,
+      callback
+    ) => {
+      try {
+        const projectId =
+          req.params.projectId;
+
+        const projectDirectory =
+          path.join(
+            UPLOAD_ROOT,
+            "projects",
+            projectId
+          );
+
+        await fs.mkdir(
+          projectDirectory,
+          {
+            recursive: true,
+          }
+        );
+
+        callback(null, projectDirectory);
+      } catch (error) {
+        callback(
+          error instanceof Error
+            ? error
+            : new Error(
+                "Failed to create upload directory"
+              ),
+          ""
+        );
+      }
+    },
+
+    filename: (
+      _req,
+      file,
+      callback
+    ) => {
+      const originalName =
+        path.basename(file.originalname);
+
+      const extension =
+        path.extname(originalName);
+
+      const baseName =
+        path.basename(
+          originalName,
+          extension
+        );
+
+      const safeBaseName =
+        baseName
+          .replace(
+            /[^a-zA-Z0-9._-]/g,
+            "_"
+          )
+          .slice(0, 100);
+
+      callback(
+        null,
+        `${safeBaseName}-${randomUUID()}${extension}`
+      );
+    },
+  }),
+
+  limits: {
+    fileSize: MAX_FILE_SIZE,
+    files: 100,
+  },
+
+  fileFilter: (
+    _req,
+    file,
+    callback
+  ) => {
+    const extension =
+      path.extname(
+        file.originalname
+      ).toLowerCase();
+
+    if (
+      ALLOWED_EXTENSIONS.has(
+        extension
+      )
+    ) {
+      callback(null, true);
+      return;
+    }
+
+    callback(
+      new Error(
+        `Unsupported file type: ${extension || "unknown"}`
+      )
+    );
+  },
+});
+
+/*
+|--------------------------------------------------------------------------
+| Middleware
+|--------------------------------------------------------------------------
+*/
+
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
+app.use(
+  express.json({
+    limit: "5mb",
+  })
+);
+
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "5mb",
+  })
+);
+
+/*
+|--------------------------------------------------------------------------
+| Types
+|--------------------------------------------------------------------------
+*/
+
+interface ProjectRow {
+  id: string;
+  title: string;
+  description: string;
+  status?: string;
+  createdAt?: string;
 }
 
-function getProjectOrNull(projectId: string) {
+interface ProjectParams {
+  projectId: string;
+}
+
+interface IdParams {
+  id: string;
+}
+
+interface TaskParams {
+  projectId: string;
+  taskId: string;
+}
+
+interface MilestoneParams {
+  projectId: string;
+  milestoneId: string;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Helpers
+|--------------------------------------------------------------------------
+*/
+
+function getProjectOrNull(
+  projectId: string
+): ProjectRow | undefined {
   return db
     .prepare(
       `
       SELECT
         id,
         title,
-        description
+        description,
+        status,
+        created_at AS createdAt
       FROM projects
       WHERE id = ?
       `
     )
     .get(projectId) as
-    | {
-        id: string;
-        title: string;
-        description: string;
-      }
+    | ProjectRow
     | undefined;
 }
 
-/**
- * Health check
- */
-app.get("/api/health", (_req, res) => {
-  res.json({
-    success: true,
-    message: "DevSmith API is running",
-    features: {
-      assistant: true,
-      roadmapEditing: true,
-      persistedChat: true,
-    },
+function isValidString(
+  value: unknown
+): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0
+  );
+}
+
+function sendError(
+  res: Response,
+  status: number,
+  error: unknown,
+  fallback: string
+) {
+  return res.status(status).json({
+    error:
+      error instanceof Error
+        ? error.message
+        : fallback,
   });
-});
+}
 
-/**
- * Get all projects
- */
-app.get("/api/projects", (_req, res) => {
+function getProjectUploadDirectory(
+  projectId: string
+) {
+  return path.join(
+    UPLOAD_ROOT,
+    "projects",
+    projectId
+  );
+}
+
+async function getUploadedProjectFiles(
+  projectId: string
+) {
+  const directory =
+    getProjectUploadDirectory(
+      projectId
+    );
+
   try {
-    const projects = db
-      .prepare(
-        `
-        SELECT
-          id,
-          title,
-          description,
-          status,
-          created_at AS createdAt
-        FROM projects
-        ORDER BY created_at DESC
-        `
-      )
-      .all();
-
-    res.json(projects);
-  } catch (error) {
-    console.error("Failed to fetch projects:", error);
-
-    res.status(500).json({
-      error: "Failed to fetch projects",
-    });
-  }
-});
-
-/**
- * Get single project
- */
-app.get("/api/projects/:id", (req, res) => {
-  try {
-    const project = db
-      .prepare(
-        `
-        SELECT
-          id,
-          title,
-          description,
-          status,
-          created_at AS createdAt
-        FROM projects
-        WHERE id = ?
-        `
-      )
-      .get(req.params.id);
-
-    if (!project) {
-      return res.status(404).json({
-        error: "Project not found",
-      });
-    }
-
-    res.json(project);
-  } catch (error) {
-    console.error("Failed to fetch project:", error);
-
-    res.status(500).json({
-      error: "Failed to fetch project",
-    });
-  }
-});
-
-/**
- * Create project
- */
-app.post("/api/projects", (req, res) => {
-  try {
-    const { title, description } = req.body;
-
-    if (!title || typeof title !== "string" || !title.trim()) {
-      return res.status(400).json({
-        error: "Project title is required",
-      });
-    }
-
-    const project = {
-      id: randomUUID(),
-      title: title.trim(),
-      description:
-        typeof description === "string"
-          ? description.trim()
-          : "",
-      status: "Planning",
-      createdAt: new Date().toISOString(),
-    };
-
-    db.prepare(
-      `
-      INSERT INTO projects (
-        id,
-        title,
-        description,
-        status,
-        created_at
-      )
-      VALUES (
-        @id,
-        @title,
-        @description,
-        @status,
-        @createdAt
-      )
-      `
-    ).run(project);
-
-    res.status(201).json(project);
-  } catch (error) {
-    console.error("Failed to create project:", error);
-
-    res.status(500).json({
-      error: "Failed to create project",
-    });
-  }
-});
-
-/**
- * Delete project
- */
-app.delete("/api/projects/:id", (req, res) => {
-  try {
-    const result = db
-      .prepare(
-        `
-        DELETE FROM projects
-        WHERE id = ?
-        `
-      )
-      .run(req.params.id);
-
-    if (result.changes === 0) {
-      return res.status(404).json({
-        error: "Project not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      message: "Project deleted",
-    });
-  } catch (error) {
-    console.error("Failed to delete project:", error);
-
-    res.status(500).json({
-      error: "Failed to delete project",
-    });
-  }
-});
-
-/**
- * Get project roadmap
- */
-app.get("/api/projects/:projectId/roadmap", (req, res) => {
-  try {
-    const { projectId } = req.params;
-
-    // Make sure project exists
-    const project = db
-      .prepare(
-        `
-        SELECT id
-        FROM projects
-        WHERE id = ?
-        `
-      )
-      .get(projectId);
-
-    if (!project) {
-      return res.status(404).json({
-        error: "Project not found",
-      });
-    }
-
-    const milestones = db
-      .prepare(
-        `
-        SELECT
-          id,
-          title,
-          description,
-          milestone_order AS milestoneOrder
-        FROM milestones
-        WHERE project_id = ?
-        ORDER BY milestone_order ASC
-        `
-      )
-      .all(projectId) as {
-        id: string;
-        title: string;
-        description: string;
-        milestoneOrder: number;
-      }[];
-
-    const tasks = db
-      .prepare(
-        `
-        SELECT
-          id,
-          milestone_id AS milestoneId,
-          title,
-          description,
-          completed
-        FROM tasks
-        WHERE milestone_id IN (
-          SELECT id
-          FROM milestones
-          WHERE project_id = ?
-        )
-        ORDER BY rowid ASC
-        `
-      )
-      .all(projectId) as {
-        id: string;
-        milestoneId: string;
-        title: string;
-        description: string;
-        completed: number;
-      }[];
-
-    const roadmap = milestones.map((milestone) => ({
-      id: milestone.id,
-      title: milestone.title,
-      description: milestone.description,
-      order: milestone.milestoneOrder,
-      tasks: tasks
-        .filter(
-          (task) =>
-            task.milestoneId === milestone.id
-        )
-        .map((task) => ({
-          id: task.id,
-          title: task.title,
-          description: task.description,
-          completed: Boolean(task.completed),
-        })),
-    }));
-
-    // Included as top-level `id` so this matches the frontend's Roadmap type
-    // (id, projectId, milestones). There's no separate roadmaps table, so
-    // projectId doubles as the roadmap id — one roadmap per project.
-    res.json({
-      id: projectId,
-      projectId,
-      milestones: roadmap,
-    });
-  } catch (error) {
-    console.error("Failed to fetch roadmap:", error);
-
-    res.status(500).json({
-      error: "Failed to fetch roadmap",
-    });
-  }
-});
-
-/**
- * Generate project roadmap
- *
- * For now this creates a starter roadmap.
- * Later we will replace this with AI generation.
- */
-app.post(
-  "/api/projects/:projectId/roadmap/generate",
-  async (req, res) => {
-    try {
-      const { projectId } = req.params;
-      const { model } = req.body;
-
-        if (!model || typeof model !== "string") {
-        return res.status(400).json({
-            error: "Ollama model is required",
-        });
+    const entries =
+      await fs.readdir(
+        directory,
+        {
+          withFileTypes: true,
         }
+      );
 
-      // Check project
-      const project = db
+    return entries
+      .filter(
+        (entry) =>
+          entry.isFile()
+      )
+      .map((entry) => ({
+        name: entry.name,
+        path: path.join(
+          directory,
+          entry.name
+        ),
+        extension:
+          path
+            .extname(entry.name)
+            .toLowerCase(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/*
+|--------------------------------------------------------------------------
+| Health
+|--------------------------------------------------------------------------
+*/
+
+app.get(
+  "/api/health",
+  async (
+    _req: Request,
+    res: Response
+  ) => {
+    let ollamaConnected = false;
+
+    try {
+      ollamaConnected =
+        await isOllamaRunning();
+    } catch {
+      ollamaConnected = false;
+    }
+
+    return res.json({
+      success: true,
+      message:
+        "DevSmith API is running",
+
+      server: {
+        port: PORT,
+      },
+
+      ollama: {
+        connected:
+          ollamaConnected,
+        url: OLLAMA_URL,
+      },
+
+      features: {
+        assistant: true,
+        roadmapGeneration: true,
+        roadmapEditing: true,
+        persistedChat: true,
+        taskCodeGeneration: true,
+        projectIndexing: true,
+        fileUpload: true,
+      },
+    });
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| Projects
+|--------------------------------------------------------------------------
+*/
+
+app.get(
+  "/api/projects",
+  (
+    _req: Request,
+    res: Response
+  ) => {
+    try {
+      const projects = db
         .prepare(
           `
           SELECT
             id,
             title,
-            description
+            description,
+            status,
+            created_at AS createdAt
           FROM projects
-          WHERE id = ?
+          ORDER BY created_at DESC
           `
         )
-        .get(projectId) as
-        | {
-            id: string;
-            title: string;
-            description: string;
-          }
-        | undefined;
+        .all();
+
+      return res.json(projects);
+    } catch (error) {
+      console.error(
+        "Failed to fetch projects:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to fetch projects"
+      );
+    }
+  }
+);
+
+app.get(
+  "/api/projects/:id",
+  (
+    req: Request<IdParams>,
+    res: Response
+  ) => {
+    try {
+      const project =
+        getProjectOrNull(
+          req.params.id
+        );
 
       if (!project) {
         return res.status(404).json({
-          error: "Project not found",
+          error:
+            "Project not found",
         });
       }
 
-      // Prevent duplicate roadmap generation
-      const existing = db
-        .prepare(
-          `
-          SELECT COUNT(*) AS count
-          FROM milestones
-          WHERE project_id = ?
-          `
-        )
-        .get(projectId) as {
-        count: number;
+      return res.json(project);
+    } catch (error) {
+      console.error(
+        "Failed to fetch project:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to fetch project"
+      );
+    }
+  }
+);
+
+app.post(
+  "/api/projects",
+  (
+    req: Request,
+    res: Response
+  ) => {
+    try {
+      const {
+        title,
+        description,
+      } = req.body;
+
+      if (!isValidString(title)) {
+        return res.status(400).json({
+          error:
+            "Project title is required",
+        });
+      }
+
+      const project = {
+        id: randomUUID(),
+        title: title.trim(),
+        description:
+          typeof description ===
+          "string"
+            ? description.trim()
+            : "",
+        status: "Planning",
+        createdAt:
+          new Date().toISOString(),
       };
 
-      if (existing.count > 0) {
-        return res.status(409).json({
-          error: "Roadmap already exists",
+      db.prepare(
+        `
+        INSERT INTO projects (
+          id,
+          title,
+          description,
+          status,
+          created_at
+        )
+        VALUES (
+          @id,
+          @title,
+          @description,
+          @status,
+          @createdAt
+        )
+        `
+      ).run(project);
+
+      return res
+        .status(201)
+        .json(project);
+    } catch (error) {
+      console.error(
+        "Failed to create project:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to create project"
+      );
+    }
+  }
+);
+
+app.delete(
+  "/api/projects/:id",
+  (
+    req: Request<IdParams>,
+    res: Response
+  ) => {
+    try {
+      const projectId =
+        req.params.id;
+
+      const result = db
+        .prepare(
+          `
+          DELETE FROM projects
+          WHERE id = ?
+          `
+        )
+        .run(projectId);
+
+      if (result.changes === 0) {
+        return res.status(404).json({
+          error:
+            "Project not found",
         });
       }
 
-      /**
-       * Temporary roadmap.
-       *
-       * Later:
-       *
-       * User idea
-       *      ↓
-       * AI
-       *      ↓
-       * Structured roadmap
+      /*
+       * Remove uploaded files
+       * belonging to this project.
        */
-      const aiRoadmap = await generateRoadmap(
-        project.title,
-        project.description,
-        model
+      fs.rm(
+        getProjectUploadDirectory(
+          projectId
+        ),
+        {
+          recursive: true,
+          force: true,
+        }
+      ).catch((error) => {
+        console.warn(
+          "Failed to remove project uploads:",
+          error
+        );
+      });
+
+      return res.json({
+        success: true,
+        message:
+          "Project deleted",
+      });
+    } catch (error) {
+      console.error(
+        "Failed to delete project:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to delete project"
+      );
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| File Upload
+|--------------------------------------------------------------------------
+*/
+
+/*
+ * Upload one or multiple files.
+ *
+ * Frontend:
+ *
+ * const formData = new FormData();
+ *
+ * files.forEach((file) => {
+ *   formData.append("files", file);
+ * });
+ *
+ * axios.post(
+ *   `/api/projects/${projectId}/files`,
+ *   formData
+ * );
+ */
+
+app.post(
+  "/api/projects/:projectId/files",
+  (
+    req: Request<ProjectParams>,
+    res: Response,
+    next: NextFunction
+  ) => {
+    upload.array("files", 100)(
+      req,
+      res,
+      async (error) => {
+        if (error) {
+          console.error(
+            "File upload failed:",
+            error
+          );
+
+          if (
+            error instanceof multer.MulterError
+          ) {
+            if (
+              error.code ===
+              "LIMIT_FILE_SIZE"
+            ) {
+              return res
+                .status(413)
+                .json({
+                  error:
+                    "File is too large. Maximum size is 10 MB.",
+                });
+            }
+
+            if (
+              error.code ===
+              "LIMIT_FILE_COUNT"
+            ) {
+              return res
+                .status(413)
+                .json({
+                  error:
+                    "Too many files. Maximum is 100 files.",
+                });
+            }
+          }
+
+          return sendError(
+            res,
+            400,
+            error,
+            "File upload failed"
+          );
+        }
+
+        try {
+          const {
+            projectId,
+          } = req.params;
+
+          if (
+            !getProjectOrNull(
+              projectId
+            )
+          ) {
+            return res
+              .status(404)
+              .json({
+                error:
+                  "Project not found",
+              });
+          }
+
+          const files =
+            (req.files as Express.Multer.File[]) ||
+            [];
+
+          if (
+            files.length === 0
+          ) {
+            return res
+              .status(400)
+              .json({
+                error:
+                  "No files uploaded",
+              });
+          }
+
+          const uploadDirectory =
+            getProjectUploadDirectory(
+              projectId
+            );
+
+          let indexedFiles:
+            IndexedFile[] = [];
+
+          try {
+            indexedFiles =
+              await indexProjectFiles(
+                uploadDirectory
+              );
+          } catch (indexError) {
+            console.warn(
+              "Files uploaded but indexing failed:",
+              indexError
+            );
+          }
+
+          return res.status(201).json({
+            success: true,
+            projectId,
+
+            files: files.map(
+              (file) => ({
+                name:
+                  file.originalname,
+                storedName:
+                  file.filename,
+                size:
+                  file.size,
+                type:
+                  file.mimetype,
+                extension:
+                  path
+                    .extname(
+                      file.originalname
+                    )
+                    .toLowerCase(),
+              })
+            ),
+
+            fileCount:
+              files.length,
+
+            indexedFileCount:
+              indexedFiles.length,
+
+            message:
+              "Files uploaded successfully",
+          });
+        } catch (error) {
+          console.error(
+            "Failed to process uploaded files:",
+            error
+          );
+
+          return sendError(
+            res,
+            500,
+            error,
+            "Failed to process uploaded files"
+          );
+        }
+      }
+    );
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| List Uploaded Files
+|--------------------------------------------------------------------------
+*/
+
+app.get(
+  "/api/projects/:projectId/files",
+  async (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
+    try {
+      const {
+        projectId,
+      } = req.params;
+
+      if (
+        !getProjectOrNull(
+          projectId
+        )
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
+      }
+
+      const files =
+        await getUploadedProjectFiles(
+          projectId
         );
 
-        const milestones = aiRoadmap.milestones;
+      return res.json({
+        success: true,
+        projectId,
+        fileCount:
+          files.length,
 
-      const insertMilestone = db.prepare(`
-        INSERT INTO milestones (
-          id,
-          project_id,
-          title,
-          description,
-          milestone_order
-        )
-        VALUES (
-          @id,
-          @projectId,
-          @title,
-          @description,
-          @order
-        )
-      `);
-
-      const insertTask = db.prepare(`
-        INSERT INTO tasks (
-          id,
-          milestone_id,
-          title,
-          description,
-          completed
-        )
-        VALUES (
-          @id,
-          @milestoneId,
-          @title,
-          @description,
-          0
-        )
-      `);
-
-      const transaction = db.transaction(() => {
-        milestones.forEach((milestone, index) => {
-          const milestoneId = randomUUID();
-
-          insertMilestone.run({
-            id: milestoneId,
-            projectId,
-            title: milestone.title,
-            description: milestone.description,
-            order: index + 1,
-          });
-
-          milestone.tasks.forEach((taskTitle) => {
-            insertTask.run({
-              id: randomUUID(),
-              milestoneId,
-              title: taskTitle,
-              description: "",
-            });
-          });
-        });
+        files: files.map(
+          (file) => ({
+            name: file.name,
+            extension:
+              file.extension,
+          })
+        ),
       });
+    } catch (error) {
+      console.error(
+        "Failed to list uploaded files:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to list uploaded files"
+      );
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| Delete Uploaded Files
+|--------------------------------------------------------------------------
+*/
+
+app.delete(
+  "/api/projects/:projectId/files",
+  async (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
+    try {
+      const {
+        projectId,
+      } = req.params;
+
+      if (
+        !getProjectOrNull(
+          projectId
+        )
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
+      }
+
+      await fs.rm(
+        getProjectUploadDirectory(
+          projectId
+        ),
+        {
+          recursive: true,
+          force: true,
+        }
+      );
+
+      return res.json({
+        success: true,
+        message:
+          "Uploaded project files deleted",
+      });
+    } catch (error) {
+      console.error(
+        "Failed to delete uploaded files:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to delete uploaded files"
+      );
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| Roadmap
+|--------------------------------------------------------------------------
+*/
+
+app.get(
+  "/api/projects/:projectId/roadmap",
+  (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
+    try {
+      const {
+        projectId,
+      } = req.params;
+
+      if (
+        !getProjectOrNull(
+          projectId
+        )
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
+      }
+
+      const milestones =
+        db
+          .prepare(
+            `
+            SELECT
+              id,
+              title,
+              description,
+              milestone_order AS milestoneOrder
+            FROM milestones
+            WHERE project_id = ?
+            ORDER BY milestone_order ASC
+            `
+          )
+          .all(projectId) as {
+          id: string;
+          title: string;
+          description: string;
+          milestoneOrder: number;
+        }[];
+
+      const tasks =
+        db
+          .prepare(
+            `
+            SELECT
+              tasks.id,
+              tasks.milestone_id AS milestoneId,
+              tasks.title,
+              tasks.description,
+              tasks.completed
+            FROM tasks
+            JOIN milestones
+              ON milestones.id =
+                 tasks.milestone_id
+            WHERE milestones.project_id = ?
+            ORDER BY tasks.rowid ASC
+            `
+          )
+          .all(projectId) as {
+          id: string;
+          milestoneId: string;
+          title: string;
+          description: string;
+          completed: number;
+        }[];
+
+      const roadmap =
+        milestones.map(
+          (milestone) => ({
+            id: milestone.id,
+            title: milestone.title,
+            description:
+              milestone.description,
+            order:
+              milestone.milestoneOrder,
+
+            tasks: tasks
+              .filter(
+                (task) =>
+                  task.milestoneId ===
+                  milestone.id
+              )
+              .map((task) => ({
+                id: task.id,
+                title: task.title,
+                description:
+                  task.description,
+                completed:
+                  Boolean(
+                    task.completed
+                  ),
+              })),
+          })
+        );
+
+      return res.json({
+        id: projectId,
+        projectId,
+        milestones: roadmap,
+      });
+    } catch (error) {
+      console.error(
+        "Failed to fetch roadmap:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to fetch roadmap"
+      );
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| Generate Roadmap
+|--------------------------------------------------------------------------
+*/
+
+app.post(
+  "/api/projects/:projectId/roadmap/generate",
+  async (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
+    try {
+      const {
+        projectId,
+      } = req.params;
+
+      const { model } =
+        req.body;
+
+      if (!isValidString(model)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Ollama model is required",
+          });
+      }
+
+      const project =
+        getProjectOrNull(
+          projectId
+        );
+
+      if (!project) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
+      }
+
+      const existing =
+        db
+          .prepare(
+            `
+            SELECT COUNT(*) AS count
+            FROM milestones
+            WHERE project_id = ?
+            `
+          )
+          .get(projectId) as {
+          count: number;
+        };
+
+      if (existing.count > 0) {
+        return res
+          .status(409)
+          .json({
+            error:
+              "Roadmap already exists",
+          });
+      }
+
+      const aiRoadmap =
+        await generateRoadmap(
+          project.title,
+          project.description,
+          model.trim()
+        );
+
+      if (
+        !aiRoadmap ||
+        !Array.isArray(
+          aiRoadmap.milestones
+        )
+      ) {
+        throw new Error(
+          "AI returned an invalid roadmap."
+        );
+      }
+
+      const insertMilestone =
+        db.prepare(
+          `
+          INSERT INTO milestones (
+            id,
+            project_id,
+            title,
+            description,
+            milestone_order
+          )
+          VALUES (
+            @id,
+            @projectId,
+            @title,
+            @description,
+            @order
+          )
+          `
+        );
+
+      const insertTask =
+        db.prepare(
+          `
+          INSERT INTO tasks (
+            id,
+            milestone_id,
+            title,
+            description,
+            completed
+          )
+          VALUES (
+            @id,
+            @milestoneId,
+            @title,
+            @description,
+            0
+          )
+          `
+        );
+
+      const transaction =
+        db.transaction(() => {
+          aiRoadmap.milestones.forEach(
+            (
+              milestone,
+              milestoneIndex
+            ) => {
+              const milestoneId =
+                randomUUID();
+
+              insertMilestone.run({
+                id: milestoneId,
+                projectId,
+                title:
+                  milestone.title.trim(),
+                description:
+                  milestone.description?.trim() ||
+                  "",
+                order:
+                  milestoneIndex + 1,
+              });
+
+              if (
+                Array.isArray(
+                  milestone.tasks
+                )
+              ) {
+                milestone.tasks.forEach(
+                  (taskTitle) => {
+                    if (
+                      !isValidString(
+                        taskTitle
+                      )
+                    ) {
+                      return;
+                    }
+
+                    insertTask.run({
+                      id: randomUUID(),
+                      milestoneId,
+                      title:
+                        taskTitle.trim(),
+                      description:
+                        "",
+                    });
+                  }
+                );
+              }
+            }
+          );
+        });
 
       transaction();
 
-      res.status(201).json({
-        success: true,
-        message: "Roadmap generated",
-        projectId,
-      });
+      return res
+        .status(201)
+        .json({
+          success: true,
+          message:
+            "Roadmap generated",
+          projectId,
+        });
     } catch (error) {
       console.error(
         "Failed to generate roadmap:",
         error
       );
 
-      res.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to generate roadmap",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to generate roadmap"
+      );
     }
   }
 );
 
-/**
- * Toggle task completion.
- *
- * This is the route the frontend actually calls:
- * PATCH /api/projects/:projectId/roadmap/tasks/:taskId
- *
- * (Previously this only existed as `PUT /api/tasks/:id` — a different
- * method AND a different path — so every checkbox click from
- * ProjectWorkspace was silently 404ing.)
- */
+/*
+|--------------------------------------------------------------------------
+| Update Task
+|--------------------------------------------------------------------------
+*/
+
 app.patch(
   "/api/projects/:projectId/roadmap/tasks/:taskId",
-  (req: Request, res: Response) => {
+  (
+    req: Request<TaskParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId, taskId } = req.params;
-      const { completed, title, description } = req.body;
+      const {
+        projectId,
+        taskId,
+      } = req.params;
 
-      const task = db
-        .prepare(
-          `
-          SELECT tasks.id
-          FROM tasks
-          JOIN milestones ON milestones.id = tasks.milestone_id
-          WHERE tasks.id = ? AND milestones.project_id = ?
-          `
-        )
-        .get(taskId, projectId);
+      const {
+        completed,
+        title,
+        description,
+      } = req.body;
+
+      const task =
+        db
+          .prepare(
+            `
+            SELECT tasks.id
+            FROM tasks
+            JOIN milestones
+              ON milestones.id =
+                 tasks.milestone_id
+            WHERE
+              tasks.id = ?
+              AND milestones.project_id = ?
+            `
+          )
+          .get(
+            taskId,
+            projectId
+          );
 
       if (!task) {
-        return res.status(404).json({
-          error: "Task not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Task not found",
+          });
       }
 
-      const updates: string[] = [];
-      const values: unknown[] = [];
+      const updates: string[] =
+        [];
 
-      if (typeof completed === "boolean") {
-        updates.push("completed = ?");
-        values.push(completed ? 1 : 0);
+      const values: unknown[] =
+        [];
+
+      if (
+        typeof completed ===
+        "boolean"
+      ) {
+        updates.push(
+          "completed = ?"
+        );
+
+        values.push(
+          completed ? 1 : 0
+        );
       }
 
-      if (typeof title === "string" && title.trim()) {
-        updates.push("title = ?");
-        values.push(title.trim());
+      if (
+        typeof title === "string" &&
+        title.trim()
+      ) {
+        updates.push(
+          "title = ?"
+        );
+
+        values.push(
+          title.trim()
+        );
       }
 
-      if (typeof description === "string") {
-        updates.push("description = ?");
-        values.push(description.trim());
+      if (
+        typeof description ===
+        "string"
+      ) {
+        updates.push(
+          "description = ?"
+        );
+
+        values.push(
+          description.trim()
+        );
       }
 
-      if (updates.length === 0) {
-        return res.status(400).json({
-          error:
-            "Provide completed, title, or description to update",
-        });
+      if (!updates.length) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Provide completed, title, or description to update",
+          });
       }
 
       values.push(taskId);
@@ -564,20 +1372,21 @@ app.patch(
         `
       ).run(...values);
 
-      const updated = db
-        .prepare(
-          `
-          SELECT
-            id,
-            milestone_id AS milestoneId,
-            title,
-            description,
-            completed
-          FROM tasks
-          WHERE id = ?
-          `
-        )
-        .get(taskId) as {
+      const updated =
+        db
+          .prepare(
+            `
+            SELECT
+              id,
+              milestone_id AS milestoneId,
+              title,
+              description,
+              completed
+            FROM tasks
+            WHERE id = ?
+            `
+          )
+          .get(taskId) as {
           id: string;
           milestoneId: string;
           title: string;
@@ -585,53 +1394,89 @@ app.patch(
           completed: number;
         };
 
-      res.json({
+      return res.json({
         id: updated.id,
-        milestoneId: updated.milestoneId,
+        milestoneId:
+          updated.milestoneId,
         title: updated.title,
-        description: updated.description,
-        completed: Boolean(updated.completed),
+        description:
+          updated.description,
+        completed:
+          Boolean(
+            updated.completed
+          ),
       });
     } catch (error) {
-      console.error("Failed to update task:", error);
+      console.error(
+        "Failed to update task:",
+        error
+      );
 
-      res.status(500).json({
-        error: "Failed to update task",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to update task"
+      );
     }
   }
 );
 
-/**
- * Add a task to a milestone
- */
+/*
+|--------------------------------------------------------------------------
+| Create Task
+|--------------------------------------------------------------------------
+*/
+
 app.post(
   "/api/projects/:projectId/roadmap/milestones/:milestoneId/tasks",
-  (req, res) => {
+  (
+    req: Request<MilestoneParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId, milestoneId } = req.params;
-      const { title, description } = req.body;
+      const {
+        projectId,
+        milestoneId,
+      } = req.params;
 
-      if (!title || typeof title !== "string" || !title.trim()) {
-        return res.status(400).json({
-          error: "Task title is required",
-        });
+      const {
+        title,
+        description,
+      } = req.body;
+
+      if (!isValidString(title)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Task title is required",
+          });
       }
 
-      const milestone = db
-        .prepare(
-          `
-          SELECT id
-          FROM milestones
-          WHERE id = ? AND project_id = ?
-          `
-        )
-        .get(milestoneId, projectId);
+      const milestone =
+        db
+          .prepare(
+            `
+            SELECT id
+            FROM milestones
+            WHERE
+              id = ?
+              AND project_id = ?
+            `
+          )
+          .get(
+            milestoneId,
+            projectId
+          );
 
       if (!milestone) {
-        return res.status(404).json({
-          error: "Milestone not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Milestone not found",
+          });
       }
 
       const task = {
@@ -639,7 +1484,8 @@ app.post(
         milestoneId,
         title: title.trim(),
         description:
-          typeof description === "string"
+          typeof description ===
+          "string"
             ? description.trim()
             : "",
         completed: false,
@@ -664,41 +1510,69 @@ app.post(
         `
       ).run(task);
 
-      res.status(201).json(task);
+      return res
+        .status(201)
+        .json(task);
     } catch (error) {
-      console.error("Failed to create task:", error);
+      console.error(
+        "Failed to create task:",
+        error
+      );
 
-      res.status(500).json({
-        error: "Failed to create task",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to create task"
+      );
     }
   }
 );
 
-/**
- * Delete a task
- */
+/*
+|--------------------------------------------------------------------------
+| Delete Task
+|--------------------------------------------------------------------------
+*/
+
 app.delete(
   "/api/projects/:projectId/roadmap/tasks/:taskId",
-  (req, res) => {
+  (
+    req: Request<TaskParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId, taskId } = req.params;
+      const {
+        projectId,
+        taskId,
+      } = req.params;
 
-      const task = db
-        .prepare(
-          `
-          SELECT tasks.id
-          FROM tasks
-          JOIN milestones ON milestones.id = tasks.milestone_id
-          WHERE tasks.id = ? AND milestones.project_id = ?
-          `
-        )
-        .get(taskId, projectId);
+      const task =
+        db
+          .prepare(
+            `
+            SELECT tasks.id
+            FROM tasks
+            JOIN milestones
+              ON milestones.id =
+                 tasks.milestone_id
+            WHERE
+              tasks.id = ?
+              AND milestones.project_id = ?
+            `
+          )
+          .get(
+            taskId,
+            projectId
+          );
 
       if (!task) {
-        return res.status(404).json({
-          error: "Task not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Task not found",
+          });
       }
 
       db.prepare(
@@ -708,63 +1582,114 @@ app.delete(
         `
       ).run(taskId);
 
-      res.json({
+      return res.json({
         success: true,
-        message: "Task deleted",
+        message:
+          "Task deleted",
       });
     } catch (error) {
-      console.error("Failed to delete task:", error);
+      console.error(
+        "Failed to delete task:",
+        error
+      );
 
-      res.status(500).json({
-        error: "Failed to delete task",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to delete task"
+      );
     }
   }
 );
 
-/**
- * Update a milestone
- */
+/*
+|--------------------------------------------------------------------------
+| Update Milestone
+|--------------------------------------------------------------------------
+*/
+
 app.patch(
   "/api/projects/:projectId/roadmap/milestones/:milestoneId",
-  (req, res) => {
+  (
+    req: Request<MilestoneParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId, milestoneId } = req.params;
-      const { title, description } = req.body;
+      const {
+        projectId,
+        milestoneId,
+      } = req.params;
 
-      const milestone = db
-        .prepare(
-          `
-          SELECT id
-          FROM milestones
-          WHERE id = ? AND project_id = ?
-          `
-        )
-        .get(milestoneId, projectId);
+      const {
+        title,
+        description,
+      } = req.body;
+
+      const milestone =
+        db
+          .prepare(
+            `
+            SELECT id
+            FROM milestones
+            WHERE
+              id = ?
+              AND project_id = ?
+            `
+          )
+          .get(
+            milestoneId,
+            projectId
+          );
 
       if (!milestone) {
-        return res.status(404).json({
-          error: "Milestone not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Milestone not found",
+          });
       }
 
-      const updates: string[] = [];
-      const values: unknown[] = [];
+      const updates: string[] =
+        [];
 
-      if (typeof title === "string" && title.trim()) {
-        updates.push("title = ?");
-        values.push(title.trim());
+      const values: unknown[] =
+        [];
+
+      if (
+        typeof title === "string" &&
+        title.trim()
+      ) {
+        updates.push(
+          "title = ?"
+        );
+
+        values.push(
+          title.trim()
+        );
       }
 
-      if (typeof description === "string") {
-        updates.push("description = ?");
-        values.push(description.trim());
+      if (
+        typeof description ===
+        "string"
+      ) {
+        updates.push(
+          "description = ?"
+        );
+
+        values.push(
+          description.trim()
+        );
       }
 
-      if (updates.length === 0) {
-        return res.status(400).json({
-          error: "Provide title or description to update",
-        });
+      if (!updates.length) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Provide title or description to update",
+          });
       }
 
       values.push(milestoneId);
@@ -777,84 +1702,124 @@ app.patch(
         `
       ).run(...values);
 
-      const updated = db
-        .prepare(
-          `
-          SELECT
-            id,
-            title,
-            description,
-            milestone_order AS milestoneOrder
-          FROM milestones
-          WHERE id = ?
-          `
-        )
-        .get(milestoneId) as {
+      const updated =
+        db
+          .prepare(
+            `
+            SELECT
+              id,
+              title,
+              description,
+              milestone_order AS milestoneOrder
+            FROM milestones
+            WHERE id = ?
+            `
+          )
+          .get(
+            milestoneId
+          ) as {
           id: string;
           title: string;
           description: string;
           milestoneOrder: number;
         };
 
-      res.json({
+      return res.json({
         id: updated.id,
         title: updated.title,
-        description: updated.description,
-        order: updated.milestoneOrder,
+        description:
+          updated.description,
+        order:
+          updated.milestoneOrder,
       });
     } catch (error) {
-      console.error("Failed to update milestone:", error);
+      console.error(
+        "Failed to update milestone:",
+        error
+      );
 
-      res.status(500).json({
-        error: "Failed to update milestone",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to update milestone"
+      );
     }
   }
 );
 
-/**
- * Add a milestone
- */
+/*
+|--------------------------------------------------------------------------
+| Create Milestone
+|--------------------------------------------------------------------------
+*/
+
 app.post(
   "/api/projects/:projectId/roadmap/milestones",
-  (req, res) => {
+  (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId } = req.params;
-      const { title, description } = req.body;
+      const {
+        projectId,
+      } = req.params;
 
-      if (!getProjectOrNull(projectId)) {
-        return res.status(404).json({
-          error: "Project not found",
-        });
-      }
+      const {
+        title,
+        description,
+      } = req.body;
 
-      if (!title || typeof title !== "string" || !title.trim()) {
-        return res.status(400).json({
-          error: "Milestone title is required",
-        });
-      }
-
-      const maxOrder = db
-        .prepare(
-          `
-          SELECT COALESCE(MAX(milestone_order), 0) AS maxOrder
-          FROM milestones
-          WHERE project_id = ?
-          `
+      if (
+        !getProjectOrNull(
+          projectId
         )
-        .get(projectId) as {
-        maxOrder: number;
-      };
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
+      }
+
+      if (!isValidString(title)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Milestone title is required",
+          });
+      }
+
+      const maxOrder =
+        db
+          .prepare(
+            `
+            SELECT
+              COALESCE(
+                MAX(milestone_order),
+                0
+              ) AS maxOrder
+            FROM milestones
+            WHERE project_id = ?
+            `
+          )
+          .get(projectId) as {
+          maxOrder: number;
+        };
 
       const milestone = {
         id: randomUUID(),
         projectId,
         title: title.trim(),
         description:
-          typeof description === "string"
+          typeof description ===
+          "string"
             ? description.trim()
             : "",
-        order: maxOrder.maxOrder + 1,
+        order:
+          maxOrder.maxOrder + 1,
       };
 
       db.prepare(
@@ -876,43 +1841,69 @@ app.post(
         `
       ).run(milestone);
 
-      res.status(201).json({
-        ...milestone,
-        tasks: [],
-      });
+      return res
+        .status(201)
+        .json({
+          ...milestone,
+          tasks: [],
+        });
     } catch (error) {
-      console.error("Failed to create milestone:", error);
+      console.error(
+        "Failed to create milestone:",
+        error
+      );
 
-      res.status(500).json({
-        error: "Failed to create milestone",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to create milestone"
+      );
     }
   }
 );
 
-/**
- * Delete a milestone
- */
+/*
+|--------------------------------------------------------------------------
+| Delete Milestone
+|--------------------------------------------------------------------------
+*/
+
 app.delete(
   "/api/projects/:projectId/roadmap/milestones/:milestoneId",
-  (req, res) => {
+  (
+    req: Request<MilestoneParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId, milestoneId } = req.params;
+      const {
+        projectId,
+        milestoneId,
+      } = req.params;
 
-      const milestone = db
-        .prepare(
-          `
-          SELECT id
-          FROM milestones
-          WHERE id = ? AND project_id = ?
-          `
-        )
-        .get(milestoneId, projectId);
+      const milestone =
+        db
+          .prepare(
+            `
+            SELECT id
+            FROM milestones
+            WHERE
+              id = ?
+              AND project_id = ?
+            `
+          )
+          .get(
+            milestoneId,
+            projectId
+          );
 
       if (!milestone) {
-        return res.status(404).json({
-          error: "Milestone not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Milestone not found",
+          });
       }
 
       db.prepare(
@@ -922,80 +1913,115 @@ app.delete(
         `
       ).run(milestoneId);
 
-      res.json({
+      return res.json({
         success: true,
-        message: "Milestone deleted",
+        message:
+          "Milestone deleted",
       });
     } catch (error) {
-      console.error("Failed to delete milestone:", error);
+      console.error(
+        "Failed to delete milestone:",
+        error
+      );
 
-      res.status(500).json({
-        error: "Failed to delete milestone",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to delete milestone"
+      );
     }
   }
 );
 
-/**
- * Get persisted assistant messages for a project
- */
+/*
+|--------------------------------------------------------------------------
+| Assistant Messages
+|--------------------------------------------------------------------------
+*/
+
 app.get(
   "/api/projects/:projectId/assistant/messages",
-  (req, res) => {
+  (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId } = req.params;
+      const {
+        projectId,
+      } = req.params;
 
-      if (!getProjectOrNull(projectId)) {
-        return res.status(404).json({
-          error: "Project not found",
-        });
+      if (
+        !getProjectOrNull(
+          projectId
+        )
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
       }
 
-      const messages = db
-        .prepare(
-          `
-          SELECT
-            id,
-            role,
-            mode,
-            content,
-            code,
-            task_id AS taskId,
-            created_at AS createdAt
-          FROM assistant_messages
-          WHERE project_id = ?
-          ORDER BY created_at ASC
-          `
-        )
-        .all(projectId);
+      const messages =
+        db
+          .prepare(
+            `
+            SELECT
+              id,
+              role,
+              mode,
+              content,
+              code,
+              task_id AS taskId,
+              created_at AS createdAt
+            FROM assistant_messages
+            WHERE project_id = ?
+            ORDER BY created_at ASC
+            `
+          )
+          .all(projectId);
 
-      res.json(messages);
+      return res.json(messages);
     } catch (error) {
       console.error(
         "Failed to fetch assistant messages:",
         error
       );
 
-      res.status(500).json({
-        error: "Failed to fetch assistant messages",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to fetch assistant messages"
+      );
     }
   }
 );
 
-/**
- * Clear assistant conversation for a project
- */
 app.delete(
   "/api/projects/:projectId/assistant/messages",
-  (req, res) => {
+  (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId } = req.params;
+      const {
+        projectId,
+      } = req.params;
 
-      if (!getProjectOrNull(projectId)) {
-        return res.status(404).json({
-          error: "Project not found",
-        });
+      if (
+        !getProjectOrNull(
+          projectId
+        )
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
       }
 
       db.prepare(
@@ -1005,9 +2031,10 @@ app.delete(
         `
       ).run(projectId);
 
-      res.json({
+      return res.json({
         success: true,
-        message: "Conversation cleared",
+        message:
+          "Conversation cleared",
       });
     } catch (error) {
       console.error(
@@ -1015,193 +2042,497 @@ app.delete(
         error
       );
 
-      res.status(500).json({
-        error: "Failed to clear conversation",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to clear conversation"
+      );
     }
   }
 );
 
-/**
- * Project AI Assistant — ask, generate, explain, fix (persisted)
- */
+/*
+|--------------------------------------------------------------------------
+| Index Project Files
+|--------------------------------------------------------------------------
+*/
+
+app.post(
+  "/api/projects/:projectId/index",
+  async (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
+    try {
+      const {
+        projectId,
+      } = req.params;
+
+      const {
+        projectDirectory,
+      } = req.body;
+
+      if (
+        !getProjectOrNull(
+          projectId
+        )
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
+      }
+
+      /*
+       * If the frontend doesn't provide a
+       * directory, use uploaded files.
+       */
+      const directory =
+        isValidString(
+          projectDirectory
+        )
+          ? projectDirectory.trim()
+          : getProjectUploadDirectory(
+              projectId
+            );
+
+      const files =
+        await indexProjectFiles(
+          directory
+        );
+
+      return res.json({
+        success: true,
+        projectId,
+        directory,
+        fileCount:
+          files.length,
+
+        files: files.map(
+          (file) => ({
+            path: file.path,
+            extension:
+              file.extension,
+          })
+        ),
+      });
+    } catch (error) {
+      console.error(
+        "Failed to index project:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to index project"
+      );
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| Project AI Assistant
+|--------------------------------------------------------------------------
+*/
+
 app.post(
   "/api/projects/:projectId/assistant",
-  async (req, res) => {
+  async (
+    req: Request<ProjectParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId } = req.params;
-      const { model, mode, message, code, taskId } =
-        req.body;
+      const {
+        projectId,
+      } = req.params;
 
-      if (!model || typeof model !== "string") {
-        return res.status(400).json({
-          error: "Ollama model is required",
-        });
+      const {
+        model,
+        mode,
+        message,
+        code,
+        taskId,
+        projectDirectory,
+      } = req.body;
+
+      if (!isValidString(model)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Ollama model is required",
+          });
       }
 
       if (
-        !mode ||
-        typeof mode !== "string" ||
-        !ASSISTANT_MODES.includes(mode as AssistantMode)
+        !isValidString(mode) ||
+        !ASSISTANT_MODES.includes(
+          mode as AssistantMode
+        )
       ) {
-        return res.status(400).json({
-          error:
-            "Mode must be one of: ask, generate, explain, fix",
-        });
+        return res
+          .status(400)
+          .json({
+            error:
+              "Mode must be one of: ask, generate, explain, fix",
+          });
       }
 
-      if (typeof message !== "string") {
-        return res.status(400).json({
-          error: "Message must be a string",
-        });
+      if (
+        typeof message !==
+        "string"
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Message must be a string",
+          });
       }
 
-      const project = getProjectOrNull(projectId);
+      const project =
+        getProjectOrNull(
+          projectId
+        );
 
       if (!project) {
-        return res.status(404).json({
-          error: "Project not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
       }
 
+      /*
+       * Task context
+       */
+
       let taskContext:
-        | {
-            id: string;
-            title: string;
-            description: string;
-            milestoneTitle: string;
-          }
+        | TaskContext
         | undefined;
 
-      if (taskId && typeof taskId === "string") {
-        const task = db
-          .prepare(
-            `
-            SELECT
-              tasks.id,
-              tasks.title,
-              tasks.description,
-              milestones.title AS milestoneTitle
-            FROM tasks
-            JOIN milestones
-              ON milestones.id = tasks.milestone_id
-            WHERE
-              tasks.id = ?
-              AND milestones.project_id = ?
-            `
-          )
-          .get(taskId, projectId) as
-          | {
-              id: string;
-              title: string;
-              description: string;
-              milestoneTitle: string;
-            }
-          | undefined;
+      if (
+        typeof taskId ===
+          "string" &&
+        taskId.trim()
+      ) {
+        const task =
+          db
+            .prepare(
+              `
+              SELECT
+                tasks.id,
+                tasks.title,
+                tasks.description,
+                milestones.title
+                  AS milestoneTitle
+              FROM tasks
+              JOIN milestones
+                ON milestones.id =
+                   tasks.milestone_id
+              WHERE
+                tasks.id = ?
+                AND milestones.project_id = ?
+              `
+            )
+            .get(
+              taskId,
+              projectId
+            ) as
+            | TaskContext
+            | undefined;
 
         if (!task) {
-          return res.status(404).json({
-            error: "Task not found",
-          });
+          return res
+            .status(404)
+            .json({
+              error:
+                "Task not found",
+            });
         }
 
         taskContext = task;
       }
 
-      const storedMessages = db
-        .prepare(
+      /*
+       * Index project source code
+       *
+       * If a projectDirectory is supplied,
+       * index that directory.
+       *
+       * Otherwise automatically use
+       * uploaded project files.
+       */
+
+      let indexedFiles:
+        IndexedFile[] = [];
+
+      let directoryToIndex =
+        "";
+
+      if (
+        typeof projectDirectory ===
+          "string" &&
+        projectDirectory.trim()
+      ) {
+        directoryToIndex =
+          projectDirectory.trim();
+      } else {
+        const uploadedFiles =
+          await getUploadedProjectFiles(
+            projectId
+          );
+
+        if (
+          uploadedFiles.length > 0
+        ) {
+          directoryToIndex =
+            getProjectUploadDirectory(
+              projectId
+            );
+        }
+      }
+
+      if (directoryToIndex) {
+        console.log(
+          `📂 Indexing project: ${directoryToIndex}`
+        );
+
+        try {
+          indexedFiles =
+            await indexProjectFiles(
+              directoryToIndex
+            );
+
+          console.log(
+            `📄 Indexed ${indexedFiles.length} files`
+          );
+        } catch (error) {
+          console.warn(
+            "⚠️ Project indexing failed:",
+            error
+          );
+
+          indexedFiles = [];
+        }
+      }
+
+      /*
+       * Previous conversation
+       */
+
+      const storedMessages =
+        db
+          .prepare(
+            `
+            SELECT
+              role,
+              content
+            FROM assistant_messages
+            WHERE project_id = ?
+            ORDER BY created_at ASC
+            `
+          )
+          .all(projectId) as
+          ChatTurn[];
+
+      /*
+       * Run AI assistant
+       */
+
+      const answer =
+        await runProjectAssistant(
+          mode as AssistantMode,
+          {
+            title:
+              project.title,
+
+            description:
+              project.description,
+
+            techStack: [],
+
+            files:
+              indexedFiles,
+          },
+          message,
+          model,
+          typeof code ===
+            "string"
+            ? code
+            : undefined,
+          storedMessages,
+          taskContext
+        );
+
+      /*
+       * Persist conversation
+       */
+
+      const userMessageId =
+        randomUUID();
+
+      const assistantMessageId =
+        randomUUID();
+
+      const userCreatedAt =
+        new Date().toISOString();
+
+      const assistantCreatedAt =
+        new Date().toISOString();
+
+      const insertMessage =
+        db.prepare(
           `
-          SELECT role, content
-          FROM assistant_messages
-          WHERE project_id = ?
-          ORDER BY created_at ASC
+          INSERT INTO assistant_messages (
+            id,
+            project_id,
+            role,
+            mode,
+            content,
+            code,
+            task_id,
+            created_at
+          )
+          VALUES (
+            @id,
+            @projectId,
+            @role,
+            @mode,
+            @content,
+            @code,
+            @taskId,
+            @createdAt
+          )
           `
-        )
-        .all(projectId) as AssistantChatTurn[];
+        );
 
-      const answer = await runProjectAssistant(
-        mode as AssistantMode,
-        project,
-        message,
-        model,
-        typeof code === "string" ? code : undefined,
-        storedMessages,
-        taskContext
-      );
+      const transaction =
+        db.transaction(() => {
+          insertMessage.run({
+            id:
+              userMessageId,
 
-      const now = new Date().toISOString();
-      const userMessageId = randomUUID();
-      const assistantMessageId = randomUUID();
+            projectId,
 
-      const insertMessage = db.prepare(`
-        INSERT INTO assistant_messages (
-          id,
-          project_id,
-          role,
-          mode,
-          content,
-          code,
-          task_id,
-          created_at
-        )
-        VALUES (
-          @id,
-          @projectId,
-          @role,
-          @mode,
-          @content,
-          @code,
-          @taskId,
-          @createdAt
-        )
-      `);
+            role: "user",
 
-      const transaction = db.transaction(() => {
-        insertMessage.run({
-          id: userMessageId,
-          projectId,
-          role: "user",
-          mode,
-          content: message,
-          code: typeof code === "string" ? code : "",
-          taskId: taskContext?.id ?? null,
-          createdAt: now,
+            mode,
+
+            content:
+              message.trim(),
+
+            code:
+              typeof code ===
+              "string"
+                ? code
+                : "",
+
+            taskId:
+              taskContext?.id ??
+              null,
+
+            createdAt:
+              userCreatedAt,
+          });
+
+          insertMessage.run({
+            id:
+              assistantMessageId,
+
+            projectId,
+
+            role:
+              "assistant",
+
+            mode,
+
+            content: answer,
+
+            code: "",
+
+            taskId:
+              taskContext?.id ??
+              null,
+
+            createdAt:
+              assistantCreatedAt,
+          });
         });
-
-        insertMessage.run({
-          id: assistantMessageId,
-          projectId,
-          role: "assistant",
-          mode,
-          content: answer,
-          code: "",
-          taskId: taskContext?.id ?? null,
-          createdAt: new Date().toISOString(),
-        });
-      });
 
       transaction();
 
-      res.json({
+      return res.json({
+        success: true,
+
         projectId,
+
         mode,
+
         answer,
+
+        projectContext: {
+          indexed:
+            indexedFiles.length >
+            0,
+
+          fileCount:
+            indexedFiles.length,
+
+          source:
+            directoryToIndex
+              ? "project"
+              : "none",
+        },
+
         messages: [
           {
-            id: userMessageId,
+            id:
+              userMessageId,
+
             role: "user",
+
             mode,
-            content: message,
-            code: typeof code === "string" ? code : undefined,
-            taskId: taskContext?.id,
-            createdAt: now,
+
+            content:
+              message.trim(),
+
+            code:
+              typeof code ===
+              "string"
+                ? code
+                : undefined,
+
+            taskId:
+              taskContext?.id,
+
+            createdAt:
+              userCreatedAt,
           },
+
           {
-            id: assistantMessageId,
-            role: "assistant",
+            id:
+              assistantMessageId,
+
+            role:
+              "assistant",
+
             mode,
+
             content: answer,
-            createdAt: new Date().toISOString(),
+
+            taskId:
+              taskContext?.id,
+
+            createdAt:
+              assistantCreatedAt,
           },
         ],
       });
@@ -1211,97 +2542,111 @@ app.post(
         error
       );
 
-      res.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to get AI response",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to get AI response"
+      );
     }
   }
 );
 
-/**
- * Ask DevSmith AI for help with a task
- */
+/*
+|--------------------------------------------------------------------------
+| Task Assistant
+|--------------------------------------------------------------------------
+*/
+
 app.post(
   "/api/projects/:projectId/roadmap/tasks/:taskId/ask",
-  async (req, res) => {
+  async (
+    req: Request<TaskParams>,
+    res: Response
+  ) => {
     try {
-      const { projectId, taskId } = req.params;
-      const { model } = req.body;
+      const {
+        projectId,
+        taskId,
+      } = req.params;
 
-      if (!model || typeof model !== "string") {
-        return res.status(400).json({
-          error: "Ollama model is required",
-        });
+      const { model } =
+        req.body;
+
+      if (!isValidString(model)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Ollama model is required",
+          });
       }
 
-      // Find task and make sure it belongs to this project
-      const task = db
-        .prepare(
-          `
-          SELECT
-            tasks.id,
-            tasks.title,
-            tasks.description,
-            milestones.title AS milestone_title
-          FROM tasks
-          JOIN milestones
-            ON milestones.id = tasks.milestone_id
-          WHERE
-            tasks.id = ?
-            AND milestones.project_id = ?
-          `
-        )
-        .get(taskId, projectId) as
-        | {
-            id: string;
-            title: string;
-            description: string;
-            milestone_title: string;
-          }
-        | undefined;
+      const task =
+        db
+          .prepare(
+            `
+            SELECT
+              tasks.id,
+              tasks.title,
+              tasks.description,
+              milestones.title
+                AS milestone_title
+            FROM tasks
+            JOIN milestones
+              ON milestones.id =
+                 tasks.milestone_id
+            WHERE
+              tasks.id = ?
+              AND milestones.project_id = ?
+            `
+          )
+          .get(
+            taskId,
+            projectId
+          ) as
+          | {
+              id: string;
+              title: string;
+              description: string;
+              milestone_title: string;
+            }
+          | undefined;
 
       if (!task) {
-        return res.status(404).json({
-          error: "Task not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Task not found",
+          });
       }
 
-      // Find project
-      const project = db
-        .prepare(
-          `
-          SELECT
-            title,
-            description
-          FROM projects
-          WHERE id = ?
-          `
-        )
-        .get(projectId) as
-        | {
-            title: string;
-            description: string;
-          }
-        | undefined;
+      const project =
+        getProjectOrNull(
+          projectId
+        );
 
       if (!project) {
-        return res.status(404).json({
-          error: "Project not found",
-        });
+        return res
+          .status(404)
+          .json({
+            error:
+              "Project not found",
+          });
       }
 
-      const answer = await askTaskAssistant(
-        project.title,
-        project.description,
-        task.title,
-        task.description,
-        model
-      );
+      const answer =
+        await askTaskAssistant(
+          project.title,
+          project.description,
+          task.title,
+          task.description,
+          model
+        );
 
-      res.json({
+      return res.json({
+        success: true,
         taskId,
         projectId,
         answer,
@@ -1312,49 +2657,239 @@ app.post(
         error
       );
 
-      res.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to get AI response",
-      });
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to get AI response"
+      );
     }
   }
 );
 
-/**
- * Get Ollama status and installed models
- */
-app.get("/api/ai/models", async (_req, res) => {
-  try {
-    const connected = await isOllamaRunning();
+/*
+|--------------------------------------------------------------------------
+| Ollama Models
+|--------------------------------------------------------------------------
+*/
 
-    if (!connected) {
+app.get(
+  "/api/ai/models",
+  async (
+    _req: Request,
+    res: Response
+  ) => {
+    try {
+      const connected =
+        await isOllamaRunning();
+
+      if (!connected) {
+        return res.json({
+          connected: false,
+          url: OLLAMA_URL,
+          models: [],
+        });
+      }
+
+      const models =
+        await getOllamaModels();
+
       return res.json({
-        connected: false,
-        models: [],
+        connected: true,
+        url: OLLAMA_URL,
+        models,
       });
+    } catch (error) {
+      console.error(
+        "Failed to fetch Ollama models:",
+        error
+      );
+
+      return res
+        .status(503)
+        .json({
+          connected: false,
+          url: OLLAMA_URL,
+          models: [],
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to connect to Ollama",
+        });
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| Task Code Generation
+|--------------------------------------------------------------------------
+*/
+
+app.post(
+  "/api/projects/:projectId/tasks/:taskId/generate-code",
+  async (
+    req: Request<TaskParams>,
+    res: Response
+  ) => {
+    try {
+      const {
+        projectId,
+        taskId,
+      } = req.params;
+
+      const { model } =
+        req.body;
+
+      if (!isValidString(model)) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Ollama model is required",
+          });
+      }
+
+      const task =
+        db
+          .prepare(
+            `
+            SELECT
+              tasks.id,
+              tasks.title,
+              tasks.description
+            FROM tasks
+            JOIN milestones
+              ON milestones.id =
+                 tasks.milestone_id
+            WHERE
+              tasks.id = ?
+              AND milestones.project_id = ?
+            `
+          )
+          .get(
+            taskId,
+            projectId
+          ) as
+          | {
+              id: string;
+              title: string;
+              description: string;
+            }
+          | undefined;
+
+      if (!task) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Task not found",
+          });
+      }
+
+      const result =
+        await generateCode(
+          task.title,
+          task.description,
+          model
+        );
+
+      return res.json({
+        success: true,
+        projectId,
+        taskId,
+        ...result,
+      });
+    } catch (error) {
+      console.error(
+        "Failed to generate code:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to generate code"
+      );
+    }
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| 404 Handler
+|--------------------------------------------------------------------------
+*/
+
+app.use(
+  (
+    req: Request,
+    res: Response
+  ) => {
+    return res
+      .status(404)
+      .json({
+        error:
+          "Route not found",
+        path:
+          req.originalUrl,
+      });
+  }
+);
+
+/*
+|--------------------------------------------------------------------------
+| Global Error Handler
+|--------------------------------------------------------------------------
+*/
+
+app.use(
+  (
+    error: unknown,
+    _req: Request,
+    res: Response,
+    _next: NextFunction
+  ) => {
+    console.error(
+      "Unhandled server error:",
+      error
+    );
+
+    if (res.headersSent) {
+      return;
     }
 
-    const models = await getOllamaModels();
-
-    res.json({
-      connected: true,
-      models,
-    });
-  } catch (error) {
-    console.error("Failed to fetch Ollama models:", error);
-
-    res.status(500).json({
-      connected: false,
-      models: [],
-      error: "Failed to connect to Ollama",
-    });
+    return res
+      .status(500)
+      .json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Internal server error",
+      });
   }
-});
+);
 
-app.listen(PORT, () => {
-  console.log(
-    `🚀 DevSmith API running on http://localhost:${PORT}`
-  );
-});
+/*
+|--------------------------------------------------------------------------
+| Start Server
+|--------------------------------------------------------------------------
+*/
+
+app.listen(
+  PORT,
+  () => {
+    console.log(
+      `🚀 DevSmith API running on http://localhost:${PORT}`
+    );
+
+    console.log(
+      `🤖 Ollama: ${OLLAMA_URL}`
+    );
+
+    console.log(
+      `📁 Upload directory: ${UPLOAD_ROOT}`
+    );
+  }
+);
