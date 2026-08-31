@@ -67,20 +67,13 @@ function ProjectWorkspace({
   }, [project.id]);
 
   const generateRoadmap = async () => {
-    if (!model) {
-      setError(
-        "No Ollama model selected. Open Settings and select a model first."
-      );
-      return;
-    }
-
     try {
       setGenerating(true);
       setError("");
 
       await axios.post(
         `${API_BASE_URL}/api/projects/${project.id}/roadmap/generate`,
-        { model }
+        { model: model || "default" }
       );
 
       await loadRoadmap();

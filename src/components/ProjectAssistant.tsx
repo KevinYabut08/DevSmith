@@ -596,13 +596,6 @@ export default function ProjectAssistant({
   };
 
   const sendMessage = async () => {
-    if (!model) {
-      setError(
-        "No Ollama model selected. Open Settings and select a model first."
-      );
-      return;
-    }
-
     const trimmedMessage =
       message.trim();
 
@@ -665,7 +658,7 @@ export default function ProjectAssistant({
         }>(
           `${API_BASE_URL}/api/projects/${project.id}/assistant`,
           {
-            model,
+            model: model || "default",
             mode,
             message: userContent,
             code:
