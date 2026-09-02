@@ -401,19 +401,23 @@ export default function ProjectAssistant({
     loadMessages();
   }, [project.id]);
 
-  useEffect(() => {
+    useEffect(() => {
     const loadFiles = async () => {
       try {
         setLoadingFiles(true);
 
         const response =
-          await axios.get<
+          await axios.get
             IndexedFile[]
           >(
             `${API_BASE_URL}/api/projects/${project.id}/files`
           );
 
-        setFiles(response.data);
+        setFiles(
+          Array.isArray(response.data)
+            ? response.data
+            : (response.data as any)?.files ?? []
+        );
       } catch (err) {
         console.error(
           "Failed to load indexed files:",
