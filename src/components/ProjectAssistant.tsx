@@ -401,13 +401,13 @@ export default function ProjectAssistant({
     loadMessages();
   }, [project.id]);
 
-    useEffect(() => {
+  useEffect(() => {
     const loadFiles = async () => {
       try {
         setLoadingFiles(true);
 
         const response =
-          await axios.get
+          await axios.get<
             IndexedFile[]
           >(
             `${API_BASE_URL}/api/projects/${project.id}/files`
