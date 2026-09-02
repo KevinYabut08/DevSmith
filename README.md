@@ -1,103 +1,536 @@
 # DevSmith
 
-DevSmith is a local-first AI development workspace: plan a project, get an
-AI-generated roadmap of milestones and tasks, and use an in-context AI
-assistant to ask, generate, explain, or fix code — all backed by your own
-local [Ollama](https://ollama.com) models, so your code and prompts never
-leave your machine.
+> **Turn an idea into a development roadmap — then let AI help you build it.**
+
+DevSmith is a **local-first AI development workspace** that helps developers turn project ideas into actionable development plans and then work through those plans with an in-context AI assistant.
+
+Create a project, generate an AI-powered roadmap of milestones and tasks, and use the assistant to **ask questions, generate code, explain code, and fix bugs** — all while keeping your development workflow organized.
+
+When running locally with **Ollama**, your code and prompts stay on your machine.
+
+## Demo
 
 **Live demo:** https://dev-smith-navy.vercel.app/
-*(Best experienced in [ChatGPT's in-app browser](https://learn.chatgpt.com/docs/webmcp), which supports WebMCP natively, or Chrome with `chrome://flags/#enable-webmcp-testing` enabled.)*
 
-## Why WebMCP
+The live deployment includes a hosted LLM fallback so judges can try DevSmith without installing Ollama.
 
-DevSmith already has a lot of structure an agent can use productively: named
-projects, roadmaps with milestones and tasks, and an AI assistant scoped to
-project context. Before WebMCP, an agent could only drive DevSmith by
-clicking through the UI blind — guessing at selectors, unable to tell a
-"Planning" project from an "In Progress" one without a screenshot.
+> **WebMCP:** For the full agent experience, use ChatGPT's in-app browser with WebMCP support, or a browser with WebMCP testing enabled.
 
-With WebMCP, DevSmith exposes its real actions directly:
+---
+
+## Why DevSmith?
+
+Building software often means jumping between multiple tools:
+
+* AI chat for planning
+* A task manager for organization
+* A code editor for implementation
+* Documentation for understanding APIs
+* Another AI tool for debugging
+
+DevSmith brings the **planning and AI development workflow into one workspace**.
+
+Instead of asking an AI to simply generate code, DevSmith gives the AI structured context about the project:
+
+```text
+Project
+ ├── Roadmap
+ │    ├── Milestone
+ │    │    ├── Task
+ │    │    └── Task
+ │    └── Milestone
+ │
+ └── AI Assistant
+       ├── Ask
+       ├── Generate
+       ├── Explain
+       └── Fix
+```
+
+This gives an agent meaningful project context instead of forcing it to guess what is happening from the UI.
+
+---
+
+# Why WebMCP?
+
+DevSmith was designed with structured project data and actions that an AI agent can use productively.
+
+Without WebMCP, an agent interacting with DevSmith would need to navigate the UI like a human:
+
+* Find the correct project
+* Read status badges
+* Locate buttons
+* Open menus
+* Determine which task belongs to which milestone
+* Guess which UI element performs an action
+
+This is fragile and inefficient.
+
+With **WebMCP**, DevSmith exposes its actual capabilities directly as structured tools.
+
+Instead of an agent clicking through the interface, it can interact with DevSmith's underlying functionality directly.
+
+For example, a person could tell their agent:
+
+> **"Create a project for a habit tracker API and plan it out."**
+
+The agent can then:
+
+```text
+create_project
+      ↓
+generate_roadmap
+      ↓
+create_task
+      ↓
+update_task
+```
+
+No DOM guessing.
+No screenshot interpretation.
+No manually searching for buttons.
+
+The agent works with **structured project data and actions**.
+
+---
+
+## Example WebMCP Tool
+
+DevSmith exposes tools using WebMCP's `document.modelContext` API.
+
+For example:
 
 ```js
 document.modelContext.registerTool({
   name: "generate_roadmap",
+
   description:
     "Generate an AI roadmap (milestones and tasks) for a project.",
+
   inputSchema: {
     type: "object",
     properties: {
-      projectId: { type: "string" },
-      model: { type: "string" },
+      projectId: {
+        type: "string",
+      },
+      model: {
+        type: "string",
+      },
     },
     required: ["projectId"],
   },
+
   execute: async (input) => {
-    const res = await fetch(`/api/projects/${input.projectId}/roadmap/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: input.model ?? "default" }),
-    });
+    const res = await fetch(
+      `/api/projects/${input.projectId}/roadmap/generate`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: input.model ?? "default",
+        }),
+      }
+    );
+
     return res.json();
   },
 });
 ```
 
-This means a person can say *"create a project for a habit tracker API and
-plan it out"* to their agent, and the agent calls `create_project` then
-`generate_roadmap` directly — no clicking, no guessing at the DOM, no risk
-of the agent misreading a status badge.
+The important part is that the agent isn't interacting with a button called `"Generate Roadmap"`.
 
-Tools registered: `list_projects`, `create_project`, `get_project`,
-`generate_roadmap`, `get_roadmap`, `create_task`, `update_task`,
-`ask_devsmith_assistant`. See [`src/webmcpTools.ts`](./src/webmcpTools.ts)
-for the full definitions.
+It is calling the actual capability:
 
-## Architecture
+```text
+generate_roadmap
+```
 
-- **Frontend:** React + TypeScript + Vite, Tailwind for styling
-- **Backend:** Express + TypeScript, SQLite (`better-sqlite3`) for storage
-- **AI:** [Ollama](https://ollama.com) locally by default; falls back to a
-  hosted model for the live demo deployment (see `server/ai/llmProvider.ts`)
-  so judges can try it without installing anything
+with structured input.
 
-## Running locally (recommended — fully local, no API keys)
+---
 
-**Requirements:** Node 18+, [Ollama](https://ollama.com) installed with at
-least one model pulled (e.g. `ollama pull llama3.2`).
+# WebMCP Tools
+
+DevSmith currently exposes the following tools:
+
+| Tool                     | Purpose                                |
+| ------------------------ | -------------------------------------- |
+| `list_projects`          | Retrieve available projects            |
+| `create_project`         | Create a new development project       |
+| `get_project`            | Retrieve project information           |
+| `generate_roadmap`       | Generate milestones and tasks using AI |
+| `get_roadmap`            | Retrieve a project's roadmap           |
+| `create_task`            | Create a development task              |
+| `update_task`            | Update task information or status      |
+| `ask_devsmith_assistant` | Ask the AI assistant about the project |
+
+Full tool definitions are available in:
+
+[`src/webmcpTools.ts`](./src/webmcpTools.ts)
+
+---
+
+# What WebMCP Enables
+
+WebMCP turns DevSmith from a development workspace that an agent can **look at** into one that an agent can **operate**.
+
+For example:
+
+### Human
+
+> Create a project for a habit tracker API and plan the implementation.
+
+### Agent
+
+```text
+1. create_project
+   ↓
+2. generate_roadmap
+   ↓
+3. get_roadmap
+   ↓
+4. create_task
+```
+
+Another example:
+
+### Human
+
+> What should I work on next in my current project?
+
+The agent can:
+
+```text
+list_projects
+      ↓
+get_project
+      ↓
+get_roadmap
+      ↓
+ask_devsmith_assistant
+```
+
+The agent can reason using actual project context rather than relying on screenshots or assumptions.
+
+---
+
+# Features
+
+### 🤖 AI Development Assistant
+
+Use an in-context AI assistant to:
+
+* Ask development questions
+* Generate code
+* Explain existing code
+* Fix bugs
+* Get project-specific guidance
+
+### 🗺️ AI-Generated Roadmaps
+
+Turn a project idea into an actionable development plan with:
+
+* Milestones
+* Tasks
+* Development steps
+* Project-specific context
+
+### 📋 Project Management
+
+Keep development work organized through:
+
+* Projects
+* Milestones
+* Tasks
+* Task status
+* Project context
+
+### 🔌 WebMCP Integration
+
+Expose DevSmith's core capabilities directly to AI agents through structured WebMCP tools.
+
+### 🏠 Local-First AI
+
+Use locally running Ollama models for development assistance.
+
+Your prompts and code can remain on your machine when using the local configuration.
+
+### ☁️ Cloud Demo
+
+The deployed demo supports a hosted LLM fallback so users and judges can experience DevSmith without installing Ollama.
+
+---
+
+# Architecture
+
+```text
+                     ┌──────────────────────┐
+                     │       AI Agent       │
+                     └──────────┬───────────┘
+                                │
+                             WebMCP
+                                │
+                                ▼
+┌────────────────────────────────────────────────────┐
+│                     DevSmith                       │
+│                                                    │
+│  ┌──────────────┐      ┌────────────────────────┐ │
+│  │   Projects   │      │    WebMCP Tools        │ │
+│  └──────┬───────┘      │                        │ │
+│         │              │ list_projects          │ │
+│         ▼              │ create_project         │ │
+│  ┌──────────────┐      │ get_project            │ │
+│  │   Roadmaps   │      │ generate_roadmap        │ │
+│  └──────┬───────┘      │ get_roadmap             │ │
+│         │              │ create_task             │ │
+│         ▼              │ update_task             │ │
+│  ┌──────────────┐      │ ask_assistant           │ │
+│  │    Tasks     │      └────────────────────────┘ │
+│  └──────────────┘                                 │
+│                                                    │
+└───────────────────────┬────────────────────────────┘
+                        │
+                        ▼
+                ┌───────────────┐
+                │  LLM Provider │
+                └───────┬───────┘
+                        │
+              ┌─────────┴─────────┐
+              │                   │
+              ▼                   ▼
+        ┌───────────┐       ┌────────────┐
+        │  Ollama   │       │ Cloud LLM  │
+        │  Local    │       │  Fallback  │
+        └───────────┘       └────────────┘
+```
+
+## Tech Stack
+
+### Frontend
+
+* React
+* TypeScript
+* Vite
+* Tailwind CSS
+
+### Backend
+
+* Node.js
+* Express
+* TypeScript
+* SQLite
+* `better-sqlite3`
+
+### AI
+
+* Ollama
+* Local LLM models
+* Optional hosted LLM fallback for the live demo
+
+### Agent Integration
+
+* WebMCP
+* `document.modelContext.registerTool`
+
+---
+
+# Running Locally
+
+The recommended setup uses Ollama so the AI functionality can run locally.
+
+## Requirements
+
+* Node.js 18+
+* Ollama
+* At least one Ollama model
+
+For example:
 
 ```bash
-# 1. Start Ollama
-ollama serve
+ollama pull llama3.2
+```
 
-# 2. Backend
+## 1. Start Ollama
+
+```bash
+ollama serve
+```
+
+## 2. Start the backend
+
+Open a terminal:
+
+```bash
 cd server
 npm install
-npm run dev          # runs on http://localhost:3001
+npm run dev
+```
 
-# 3. Frontend (new terminal)
+The backend runs on:
+
+```text
+http://localhost:3001
+```
+
+## 3. Start the frontend
+
+Open another terminal:
+
+```bash
 cd client
 npm install
-npm run dev           # runs on http://localhost:5173
+npm run dev
 ```
 
-Open `http://localhost:5173`. The app will detect your installed Ollama
-models automatically under Settings.
+The frontend runs on:
 
-## Running the live-demo configuration (cloud fallback)
-
-Set these environment variables on your backend deployment instead of
-running Ollama:
-
+```text
+http://localhost:5173
 ```
+
+Open:
+
+```text
+http://localhost:5173
+```
+
+DevSmith will detect your available Ollama models through the application settings.
+
+---
+
+# Live Demo Configuration
+
+The deployed version can use a hosted LLM instead of a local Ollama instance.
+
+Configure the backend with:
+
+```env
 CLOUD_LLM_API_KEY=sk-...
-CLOUD_LLM_BASE_URL=https://api.openai.com/v1   # optional, this is the default
-CLOUD_LLM_MODEL=gpt-4o-mini                     # optional
+CLOUD_LLM_BASE_URL=https://api.openai.com/v1
+CLOUD_LLM_MODEL=gpt-4o-mini
 ```
 
-Set `VITE_API_URL` on the frontend deployment to point at the deployed
-backend URL.
+`CLOUD_LLM_BASE_URL` and `CLOUD_LLM_MODEL` are optional if the defaults are appropriate.
 
-## License
+For the frontend deployment, configure:
 
-MIT — see [LICENSE](./LICENSE).
+```env
+VITE_API_URL=https://your-deployed-backend-url
+```
+
+The local configuration continues to use Ollama, while the deployed configuration can use the hosted provider.
+
+---
+
+# Local-First by Design
+
+DevSmith is designed around a simple principle:
+
+> **Your development environment should be useful without requiring your code and prompts to be sent to a third-party AI service.**
+
+When running DevSmith locally with Ollama:
+
+```text
+Your Computer
+│
+├── DevSmith
+│   ├── Frontend
+│   ├── Backend
+│   ├── SQLite database
+│   └── AI Assistant
+│
+└── Ollama
+    └── Local LLM
+```
+
+Your AI interaction can remain entirely local.
+
+The cloud LLM configuration exists primarily to make the hosted demo accessible to users who don't have Ollama installed.
+
+---
+
+# Project Structure
+
+```text
+DevSmith/
+│
+├── client/
+│   └── ...
+│
+├── server/
+│   ├── ai/
+│   │   └── llmProvider.ts
+│   └── ...
+│
+├── src/
+│   └── webmcpTools.ts
+│
+├── README.md
+├── LICENSE
+└── ...
+```
+
+---
+
+# WebMCP + DevSmith
+
+The goal of the WebMCP integration isn't simply to add another AI feature.
+
+It's to make DevSmith's existing development workflow **machine-operable**.
+
+A traditional application exposes:
+
+```text
+UI → Human → Application
+```
+
+DevSmith with WebMCP enables:
+
+```text
+Human
+  ↓
+AI Agent
+  ↓
+WebMCP
+  ↓
+DevSmith
+  ↓
+Projects / Roadmaps / Tasks / AI Assistant
+```
+
+This allows an agent to participate directly in the development workflow while still leaving the developer in control.
+
+---
+
+# Future Ideas
+
+Some directions for DevSmith include:
+
+* More WebMCP tools
+* Agent-driven task execution
+* GitHub repository integration
+* Codebase-aware AI assistance
+* Automated task completion
+* Pull request generation
+* Git integration
+* Local code indexing
+* More local AI models
+* Multi-agent development workflows
+
+---
+
+# License
+
+DevSmith is open-source software licensed under the MIT License.
+
+See the [`LICENSE`](./LICENSE) file for the full license text.
+
+---
+
+# Built With
+
+Built with **React, TypeScript, Express, SQLite, Ollama, and WebMCP**.
+
+**DevSmith — from idea → roadmap → code.**
