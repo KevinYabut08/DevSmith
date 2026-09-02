@@ -6,7 +6,7 @@ assistant to ask, generate, explain, or fix code — all backed by your own
 local [Ollama](https://ollama.com) models, so your code and prompts never
 leave your machine.
 
-**Live demo:** https://YOUR-DEPLOYED-URL-HERE
+**Live demo:** https://dev-smith-navy.vercel.app/
 *(Best experienced in [ChatGPT's in-app browser](https://learn.chatgpt.com/docs/webmcp), which supports WebMCP natively, or Chrome with `chrome://flags/#enable-webmcp-testing` enabled.)*
 
 ## Why WebMCP
