@@ -1,10 +1,11 @@
-import { ArrowUpRight } from "lucide-react";
+import { ArrowUpRight, Trash2 } from "lucide-react";
 import type { Project } from "../types/project";
 import { TerminalDots, STATUS_STYLES } from "./ui";
 
 interface ProjectCardProps {
   project: Project;
   onClick: () => void;
+  onDelete: () => void;
 }
 
 function formatDate(iso: string) {
@@ -17,6 +18,7 @@ function formatDate(iso: string) {
 export default function ProjectCard({
   project,
   onClick,
+  onDelete,
 }: ProjectCardProps) {
   const status = STATUS_STYLES[project.status];
 
@@ -38,7 +40,21 @@ export default function ProjectCard({
           {status.label}
         </span>
 
-        <TerminalDots />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete();
+            }}
+            aria-label={`Delete ${project.title}`}
+            className="rounded-lg p-1.5 text-[#7B9998] opacity-0 outline-none transition hover:bg-red-400/10 hover:text-red-300 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-red-400/40 group-hover:opacity-100"
+          >
+            <Trash2 size={14} />
+          </button>
+
+          <TerminalDots />
+        </div>
       </div>
 
       {/* Title */}

@@ -51,6 +51,12 @@ const ASSISTANT_MODES: AssistantMode[] = [
   "fix",
 ];
 
+const PROJECT_STATUSES = [
+  "Planning",
+  "In Progress",
+  "Completed",
+];
+
 /*
 |--------------------------------------------------------------------------
 | Upload Configuration
@@ -557,6 +563,70 @@ app.post(
   }
 );
 
+/*
+|--------------------------------------------------------------------------
+| Update Project Status
+|--------------------------------------------------------------------------
+|
+| Lets the frontend flip a project between Planning, In Progress,
+| and Completed -- used both for manual status changes and for
+| automatically marking a project Completed once every task in its
+| roadmap is checked off.
+|
+*/
+
+app.patch(
+  "/api/projects/:id",
+  (
+    req: Request<IdParams>,
+    res: Response
+  ) => {
+    try {
+      const { status } = req.body;
+
+      if (
+        !isValidString(status) ||
+        !PROJECT_STATUSES.includes(status)
+      ) {
+        return res.status(400).json({
+          error:
+            "Status must be one of: Planning, In Progress, Completed",
+        });
+      }
+
+      if (!getProjectOrNull(req.params.id)) {
+        return res.status(404).json({
+          error: "Project not found",
+        });
+      }
+
+      db.prepare(
+        `
+        UPDATE projects
+        SET status = ?
+        WHERE id = ?
+        `
+      ).run(status, req.params.id);
+
+      return res.json(
+        getProjectOrNull(req.params.id)
+      );
+    } catch (error) {
+      console.error(
+        "Failed to update project status:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        error,
+        "Failed to update project status"
+      );
+    }
+  }
+);
+
 app.delete(
   "/api/projects/:id",
   (
@@ -628,23 +698,6 @@ app.delete(
 | File Upload
 |--------------------------------------------------------------------------
 */
-
-/*
- * Upload one or multiple files.
- *
- * Frontend:
- *
- * const formData = new FormData();
- *
- * files.forEach((file) => {
- *   formData.append("files", file);
- * });
- *
- * axios.post(
- *   `/api/projects/${projectId}/files`,
- *   formData
- * );
- */
 
 app.post(
   "/api/projects/:projectId/files",
@@ -2086,10 +2139,6 @@ app.post(
           });
       }
 
-      /*
-       * If the frontend doesn't provide a
-       * directory, use uploaded files.
-       */
       const directory =
         isValidString(
           projectDirectory
@@ -2210,10 +2259,6 @@ app.post(
           });
       }
 
-      /*
-       * Task context
-       */
-
       let taskContext:
         | TaskContext
         | undefined;
@@ -2260,16 +2305,6 @@ app.post(
 
         taskContext = task;
       }
-
-      /*
-       * Index project source code
-       *
-       * If a projectDirectory is supplied,
-       * index that directory.
-       *
-       * Otherwise automatically use
-       * uploaded project files.
-       */
 
       let indexedFiles:
         IndexedFile[] = [];
@@ -2324,10 +2359,6 @@ app.post(
         }
       }
 
-      /*
-       * Previous conversation
-       */
-
       const storedMessages =
         db
           .prepare(
@@ -2342,10 +2373,6 @@ app.post(
           )
           .all(projectId) as
           ChatTurn[];
-
-      /*
-       * Run AI assistant
-       */
 
       const answer =
         await runProjectAssistant(
@@ -2371,10 +2398,6 @@ app.post(
           storedMessages,
           taskContext
         );
-
-      /*
-       * Persist conversation
-       */
 
       const userMessageId =
         randomUUID();

@@ -24,6 +24,7 @@ interface ProjectWorkspaceProps {
   project: Project;
   model: string | null;
   onBack: () => void;
+  onProjectUpdate?: (project: Project) => void;
 }
 
 type WorkspaceTab = "roadmap" | "assistant";
@@ -32,6 +33,7 @@ function ProjectWorkspace({
   project,
   model,
   onBack,
+  onProjectUpdate,
 }: ProjectWorkspaceProps) {
   const [activeTab, setActiveTab] =
     useState<WorkspaceTab>("roadmap");
@@ -96,6 +98,43 @@ function ProjectWorkspace({
     }
   };
 
+  const syncProjectStatus = async (
+    milestones: Milestone[]
+  ) => {
+    const allTasks = milestones.flatMap(
+      (milestone) => milestone.tasks
+    );
+
+    if (allTasks.length === 0) return;
+
+    const completedCount = allTasks.filter(
+      (task) => task.completed
+    ).length;
+
+    const nextStatus =
+      completedCount === allTasks.length
+        ? "Completed"
+        : completedCount > 0
+        ? "In Progress"
+        : "Planning";
+
+    if (nextStatus === project.status) return;
+
+    try {
+      const response = await axios.patch(
+        `${API_BASE_URL}/api/projects/${project.id}`,
+        { status: nextStatus }
+      );
+
+      onProjectUpdate?.(response.data);
+    } catch (err) {
+      console.error(
+        "Failed to sync project status:",
+        err
+      );
+    }
+  };
+
   const toggleTask = async (
     taskId: string,
     completed: boolean
@@ -103,22 +142,26 @@ function ProjectWorkspace({
     try {
       setError("");
 
+      let updatedMilestones: Milestone[] = [];
+
       setRoadmap((prev) => {
         if (!prev) return prev;
 
+        updatedMilestones = prev.milestones.map(
+          (milestone) => ({
+            ...milestone,
+            tasks: milestone.tasks.map(
+              (task) =>
+                task.id === taskId
+                  ? { ...task, completed }
+                  : task
+            ),
+          })
+        );
+
         return {
           ...prev,
-          milestones: prev.milestones.map(
-            (milestone) => ({
-              ...milestone,
-              tasks: milestone.tasks.map(
-                (task) =>
-                  task.id === taskId
-                    ? { ...task, completed }
-                    : task
-              ),
-            })
-          ),
+          milestones: updatedMilestones,
         };
       });
 
@@ -126,6 +169,8 @@ function ProjectWorkspace({
         `${API_BASE_URL}/api/projects/${project.id}/roadmap/tasks/${taskId}`,
         { completed }
       );
+
+      await syncProjectStatus(updatedMilestones);
     } catch (err) {
       console.error("Failed to update task:", err);
       await loadRoadmap();
